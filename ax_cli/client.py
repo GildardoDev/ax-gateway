@@ -279,7 +279,7 @@ class AxClient:
         return self._http.stream(
             "GET", "/api/v1/sse/messages",
             params={"token": self.token},
-            timeout=None,
+            timeout=httpx.Timeout(connect=10.0, read=90.0, write=10.0, pool=10.0),
         )
 
     def close(self):
