@@ -63,10 +63,25 @@ def _matches(
     contains: str | None = None,
     event_filter: str | None = None,
     agent_name: str = "",
+    started_at: float = 0,
 ) -> bool:
     """Check if an SSE event matches the watch condition."""
     if not isinstance(data, dict):
         return False
+
+    # Only match messages AFTER we started watching
+    if started_at > 0:
+        msg_time = data.get("timestamp") or data.get("created_at") or data.get("server_time") or ""
+        if msg_time:
+            try:
+                from datetime import datetime, timezone
+                if msg_time.endswith("Z"):
+                    msg_time = msg_time[:-1] + "+00:00"
+                msg_ts = datetime.fromisoformat(msg_time).timestamp()
+                if msg_ts < started_at:
+                    return False  # Message is from before we started watching
+            except (ValueError, TypeError):
+                pass
 
     # Event type filter
     if event_filter:
@@ -77,7 +92,7 @@ def _matches(
         return False
 
     content = data.get("content", "")
-    sender = data.get("display_name") or data.get("username") or ""
+    sender = data.get("display_name") or data.get("username") or data.get("author", {}).get("name", "")
 
     # Don't match our own messages
     if sender.lower() == agent_name.lower():
@@ -191,6 +206,7 @@ def watch(
                     contains=contains,
                     event_filter=event,
                     agent_name=agent_name,
+                    started_at=start_time,
                 ):
                     matched.append(data)
                     if not quiet and not output_json:
