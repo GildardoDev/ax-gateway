@@ -99,10 +99,14 @@ def upload_file(
             console.print("[yellow]Warning: upload succeeded but context store failed[/yellow]")
         storage_type = "failed"
 
-    # Step 3: Send message referencing the upload (if --message)
+    # Step 3: Send message referencing the upload
+    # Default: always notify. Use --quiet to skip message.
     msg_id = None
-    if message is not None:
-        content = f"{message}\n\n📎 Uploaded `{original_name}` to context (key: `{context_key}`)"
+    if not quiet:
+        if message is not None:
+            content = f"{message}\n\n📎 Uploaded `{original_name}` to context (key: `{context_key}`)"
+        else:
+            content = f"📎 Uploaded `{original_name}` to context (key: `{context_key}`)"
         attachments = [{
             "id": attachment_id,
             "content_type": content_type,
