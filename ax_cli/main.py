@@ -21,6 +21,11 @@ app.add_typer(upload.app, name="upload")
 app.add_typer(profile.app, name="profile")
 app.add_typer(assign.app, name="assign")
 
+# Work management aliases — same engine, different intent
+app.add_typer(assign.app, name="ship", help="Ship work through an agent")
+app.add_typer(assign.app, name="manage", help="Manage an agent's task to completion")
+app.add_typer(assign.app, name="boss", help="Boss an agent until they deliver")
+
 
 @app.command("send")
 def send_shortcut(
