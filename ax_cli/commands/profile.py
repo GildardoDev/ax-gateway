@@ -1,9 +1,9 @@
 """Profile management — named configs with token fingerprinting.
 
 Profiles store connection settings (URL, agent, space) plus a SHA-256
-fingerprint of the token file and the hostname where the profile was
-created. On use, the fingerprint and host are verified before the
-token is loaded.
+fingerprint of the token file, the hostname, and the working directory
+where the profile was created. On use, all three are verified before
+the token is loaded.
 
 Storage: ~/.ax/profiles/<name>/profile.toml
 """
@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import httpx
 import tomllib
 import typer
 from rich.table import Table
@@ -47,6 +48,12 @@ def _load_profile(name: str) -> dict:
 def _token_sha256(token_file: str) -> str:
     content = Path(token_file).expanduser().read_text().strip()
     return hashlib.sha256(content.encode()).hexdigest()
+
+
+def _workdir_hash(directory: str | None = None) -> str:
+    """SHA-256 of the resolved working directory path."""
+    d = Path(directory).resolve() if directory else Path.cwd().resolve()
+    return hashlib.sha256(str(d).encode()).hexdigest()
 
 
 def _write_toml(path: Path, data: dict) -> None:
@@ -101,7 +108,47 @@ def _verify_profile(profile: dict) -> list[str]:
             f"Host mismatch — expected {expected_host}, running on {current_host}"
         )
 
+    expected_workdir = profile.get("workdir_hash", "")
+    if expected_workdir:
+        current_workdir = _workdir_hash()
+        if current_workdir != expected_workdir:
+            failures.append(
+                f"Working directory mismatch — expected {expected_workdir[:12]}..., "
+                f"running from {current_workdir[:12]}... ({Path.cwd()})"
+            )
+
     return failures
+
+
+def _register_fingerprint(profile: dict) -> str | None:
+    """Register fingerprint with backend. Returns violation info or None."""
+    base_url = profile.get("base_url", "")
+    agent_id = profile.get("agent_id", "")
+    if not base_url or not agent_id:
+        return None
+
+    token_file = profile.get("token_file", "")
+    tf = Path(token_file).expanduser()
+    if not tf.exists():
+        return None
+
+    token = tf.read_text().strip()
+    try:
+        r = httpx.post(
+            f"{base_url}/api/v1/credentials/fingerprint",
+            json={
+                "agent_id": agent_id,
+                "token_sha256": profile.get("token_sha256", ""),
+                "host_binding": socket.gethostname(),
+            },
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        if r.status_code in (200, 201):
+            return None
+        return f"Backend registration: {r.status_code}"
+    except httpx.ConnectError:
+        return None  # Backend unreachable, not a failure
 
 
 @app.command("add")
@@ -121,6 +168,7 @@ def add(
 
     sha = _token_sha256(token_file)
     hostname = socket.gethostname()
+    wdir = _workdir_hash()
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     data = {
@@ -130,6 +178,8 @@ def add(
         "token_file": str(tf.resolve()),
         "token_sha256": sha,
         "host_binding": hostname,
+        "workdir_hash": wdir,
+        "workdir_path": str(Path.cwd().resolve()),
         "created_at": now,
     }
     if agent_id:
@@ -138,7 +188,10 @@ def add(
         data["space_id"] = space_id
 
     _write_toml(_profile_path(name), data)
-    console.print(f"Profile [bold]{name}[/bold] saved. Token fingerprint: {sha[:12]}...")
+    console.print(f"Profile [bold]{name}[/bold] saved.")
+    console.print(f"  Token: {sha[:12]}...")
+    console.print(f"  Host: {hostname}")
+    console.print(f"  Workdir: {Path.cwd()} ({wdir[:12]}...)")
 
 
 @app.command("use")
@@ -156,6 +209,13 @@ def use(
 
     _set_active(name)
     console.print(f"Active profile: [bold]{name}[/bold] → {profile.get('base_url')} as {profile.get('agent_name')}")
+
+    # Register fingerprint with backend (best-effort)
+    err = _register_fingerprint(profile)
+    if err:
+        console.print(f"  [yellow]Backend: {err}[/yellow]")
+    elif profile.get("agent_id"):
+        console.print(f"  [dim]Fingerprint registered with backend[/dim]")
 
 
 @app.command("list")
@@ -214,6 +274,8 @@ def verify(
         console.print(f"[green]Profile '{name}' verified.[/green]")
         console.print(f"  Token: {profile.get('token_sha256', '?')[:12]}... ✓")
         console.print(f"  Host: {profile.get('host_binding', '?')} ✓")
+        if profile.get("workdir_hash"):
+            console.print(f"  Workdir: {profile.get('workdir_path', '?')} ({profile.get('workdir_hash', '?')[:12]}...) ✓")
     else:
         console.print(f"[red]Profile '{name}' failed verification:[/red]")
         for f in failures:
