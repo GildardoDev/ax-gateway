@@ -134,18 +134,25 @@ class AxClient:
         - axp_u_ (user PAT) → user_access always (even if agent_id in config)
         """
         if self._exchanger and "Authorization" not in request.headers:
-            is_agent_pat = self.token.startswith("axp_a_")
-            if is_agent_pat and self.agent_id:
-                jwt = self._exchanger.get_token(
-                    "agent_access", agent_id=self.agent_id,
-                    scope="messages tasks context agents spaces search",
-                )
-            else:
-                jwt = self._exchanger.get_token(
-                    "user_access",
-                    scope="messages tasks context agents spaces search",
-                )
-            request.headers["Authorization"] = f"Bearer {jwt}"
+            from .token_cache import ExchangeNotAvailable
+            try:
+                is_agent_pat = self.token.startswith("axp_a_")
+                if is_agent_pat and self.agent_id:
+                    jwt = self._exchanger.get_token(
+                        "agent_access", agent_id=self.agent_id,
+                        scope="messages tasks context agents spaces search",
+                    )
+                else:
+                    jwt = self._exchanger.get_token(
+                        "user_access",
+                        scope="messages tasks context agents spaces search",
+                    )
+                request.headers["Authorization"] = f"Bearer {jwt}"
+            except ExchangeNotAvailable:
+                # Server doesn't support exchange yet — fall back to direct PAT
+                self._exchanger = None
+                self._use_exchange = False
+                request.headers["Authorization"] = f"Bearer {self.token}"
 
     def _auth_headers(self, *, for_agent: bool = False) -> dict:
         """Get headers with a fresh JWT from exchange, or static token.
@@ -155,20 +162,25 @@ class AxClient:
         Token class follows PAT type: axp_a_ → agent_access, axp_u_ → user_access.
         """
         if self._exchanger:
-            is_agent_pat = self.token.startswith("axp_a_")
-            if is_agent_pat and self.agent_id:
-                jwt = self._exchanger.get_token(
-                    "agent_access",
-                    agent_id=self.agent_id,
-                    scope="messages tasks context agents spaces search",
-                )
-            else:
-                jwt = self._exchanger.get_token(
-                    "user_access",
-                    scope="messages tasks context agents spaces search",
-                )
-            return {**self._base_headers, "Authorization": f"Bearer {jwt}"}
-        return self._base_headers
+            from .token_cache import ExchangeNotAvailable
+            try:
+                is_agent_pat = self.token.startswith("axp_a_")
+                if is_agent_pat and self.agent_id:
+                    jwt = self._exchanger.get_token(
+                        "agent_access",
+                        agent_id=self.agent_id,
+                        scope="messages tasks context agents spaces search",
+                    )
+                else:
+                    jwt = self._exchanger.get_token(
+                        "user_access",
+                        scope="messages tasks context agents spaces search",
+                    )
+                return {**self._base_headers, "Authorization": f"Bearer {jwt}"}
+            except ExchangeNotAvailable:
+                self._exchanger = None
+                self._use_exchange = False
+        return {**self._base_headers, "Authorization": f"Bearer {self.token}"}
 
     def _with_agent(self, agent_id: str | None) -> dict:
         """Get auth headers, targeting agent if specified.

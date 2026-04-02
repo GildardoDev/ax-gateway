@@ -173,19 +173,32 @@ class TokenExchanger:
         if agent_id:
             body["agent_id"] = agent_id
 
-        r = httpx.post(
-            f"{self.base_url}/auth/exchange",
-            json=body,
-            headers={
-                "Authorization": f"Bearer {self.pat}",
-                "Content-Type": "application/json",
-            },
-            timeout=10.0,
-        )
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = httpx.post(
+                f"{self.base_url}/auth/exchange",
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {self.pat}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10.0,
+            )
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code in (404, 405):
+                # Server doesn't have exchange endpoint yet — signal fallback
+                raise ExchangeNotAvailable() from e
+            raise
+        except httpx.ConnectError:
+            raise ExchangeNotAvailable()
 
     def clear_cache(self) -> None:
         """Discard all cached tokens for this PAT."""
         self._cache.clear()
         self._save_disk_cache()
+
+
+class ExchangeNotAvailable(Exception):
+    """Server does not support /auth/exchange — fall back to direct PAT."""
+    pass
