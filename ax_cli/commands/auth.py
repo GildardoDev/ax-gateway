@@ -106,6 +106,61 @@ def init(
         console.print(f"\n[yellow]Reminder:[/yellow] Add .ax/ to .gitignore")
 
 
+@app.command("exchange")
+def exchange(
+    token_class: str = typer.Option("user_access", "--class", "-c", help="Token class: user_access, user_admin, agent_access"),
+    scope: str = typer.Option("messages tasks context agents spaces search", "--scope", "-s", help="Space-separated scopes"),
+    agent_id: str = typer.Option(None, "--agent", "-a", help="Agent ID (required for agent_access)"),
+    audience: str = typer.Option("ax-api", "--audience", help="Target audience"),
+    as_json: bool = JSON_OPTION,
+):
+    """Exchange PAT for a short-lived JWT (AUTH-SPEC-001 §9).
+
+    The PAT is read from config. The JWT is printed (masked by default).
+    Use --json to get the full exchange response for scripting.
+    """
+    token = resolve_token()
+    if not token:
+        console.print("[red]No token configured.[/red] Use `ax auth init` or `ax auth token set`.")
+        raise typer.Exit(1)
+    if not token.startswith("axp_"):
+        console.print("[red]Token is not a PAT (must start with axp_).[/red]")
+        raise typer.Exit(1)
+
+    from ..token_cache import TokenExchanger
+    from ..config import resolve_base_url
+
+    exchanger = TokenExchanger(resolve_base_url(), token)
+    try:
+        jwt = exchanger.get_token(
+            token_class, agent_id=agent_id, audience=audience, scope=scope,
+        )
+    except httpx.HTTPStatusError as e:
+        handle_error(e)
+
+    if as_json:
+        # Decode claims for display without verification
+        import base64, json as json_mod
+        parts = jwt.split(".")
+        if len(parts) == 3:
+            payload = parts[1] + "=" * (-len(parts[1]) % 4)
+            claims = json_mod.loads(base64.urlsafe_b64decode(payload))
+            print_json({
+                "access_token": jwt[:20] + "...",
+                "token_class": claims.get("token_class"),
+                "sub": claims.get("sub"),
+                "scope": claims.get("scope"),
+                "expires_in": claims.get("exp", 0) - claims.get("iat", 0),
+                "agent_id": claims.get("agent_id"),
+            })
+        else:
+            print_json({"access_token": jwt[:20] + "..."})
+    else:
+        console.print(f"[green]Exchanged:[/green] {token_class}")
+        console.print(f"  JWT: {jwt[:20]}...{jwt[-10:]}")
+        console.print(f"  Cached until expiry. Use --json for details.")
+
+
 @token_app.command("set")
 def token_set(
     token: str = typer.Argument(..., help="PAT token (axp_u_...)"),

@@ -186,6 +186,11 @@ def save_space_id(space_id: str, *, local: bool = True) -> None:
     _save_config(cfg, local=local)
 
 
+def resolve_agent_id() -> str | None:
+    """Resolve agent_id from env or config."""
+    return os.environ.get("AX_AGENT_ID") or _load_config().get("agent_id")
+
+
 def get_client() -> AxClient:
     token = resolve_token()
     if not token:
@@ -195,4 +200,8 @@ def get_client() -> AxClient:
         )
         raise typer.Exit(1)
     agent_name = resolve_agent_name()
-    return AxClient(base_url=resolve_base_url(), token=token, agent_name=agent_name)
+    agent_id = resolve_agent_id()
+    return AxClient(
+        base_url=resolve_base_url(), token=token,
+        agent_name=agent_name, agent_id=agent_id,
+    )

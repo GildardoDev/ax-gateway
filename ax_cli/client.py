@@ -88,29 +88,99 @@ def _check_honeypot(token: str, base_url: str) -> None:
 
 
 class AxClient:
-    def __init__(self, base_url: str, token: str, *, agent_name: str | None = None):
+    def __init__(self, base_url: str, token: str, *, agent_name: str | None = None,
+                 agent_id: str | None = None):
         self.base_url = base_url.rstrip("/")
         self.token = token
+        self.agent_id = agent_id  # Used for exchange parameters, NOT headers (§13)
 
         # Check for honeypot keys before doing anything else
         _check_honeypot(token, self.base_url)
 
-        self._headers = {
-            "Authorization": f"Bearer {token}",
+        # AUTH-SPEC-001 §13: PAT → exchange → JWT for all business calls
+        # PAT is ONLY sent to /auth/exchange, never to business endpoints
+        self._exchanger = None
+        self._use_exchange = token.startswith("axp_")
+
+        if self._use_exchange:
+            from .token_cache import TokenExchanger
+            self._exchanger = TokenExchanger(base_url, token)
+
+        self._base_headers = {
             "Content-Type": "application/json",
         }
-        self._headers.update(_build_fingerprint(token))
-        if agent_name:
-            self._headers["X-Agent-Name"] = agent_name
+        self._base_headers.update(_build_fingerprint(token))
+        # Legacy: X-Agent-Name only for non-exchange path (Cognito JWTs)
+        if agent_name and not self._use_exchange:
+            self._base_headers["X-Agent-Name"] = agent_name
+
+        # For non-PAT tokens (Cognito), use directly
+        if not self._use_exchange:
+            self._base_headers["Authorization"] = f"Bearer {token}"
+
         self._http = httpx.Client(
-            base_url=self.base_url, headers=self._headers, timeout=30.0,
+            base_url=self.base_url, headers=self._base_headers, timeout=30.0,
+            event_hooks={"request": [self._inject_auth]} if self._use_exchange else {},
         )
 
+    def _inject_auth(self, request: httpx.Request) -> None:
+        """httpx event hook: inject fresh JWT on every request.
+
+        AUTH-SPEC-001 §13: PAT never sent to business endpoints.
+        The exchanger handles caching — this just sets the header.
+
+        Token class selection:
+        - axp_a_ (agent-bound PAT) → agent_access with bound agent
+        - axp_u_ (user PAT) → user_access always (even if agent_id in config)
+        """
+        if self._exchanger and "Authorization" not in request.headers:
+            is_agent_pat = self.token.startswith("axp_a_")
+            if is_agent_pat and self.agent_id:
+                jwt = self._exchanger.get_token(
+                    "agent_access", agent_id=self.agent_id,
+                    scope="messages tasks context agents spaces search",
+                )
+            else:
+                jwt = self._exchanger.get_token(
+                    "user_access",
+                    scope="messages tasks context agents spaces search",
+                )
+            request.headers["Authorization"] = f"Bearer {jwt}"
+
+    def _auth_headers(self, *, for_agent: bool = False) -> dict:
+        """Get headers with a fresh JWT from exchange, or static token.
+
+        AUTH-SPEC-001 §13: --agent affects exchange parameters only.
+        No X-Agent-Id/X-Agent-Name headers with exchange auth.
+        Token class follows PAT type: axp_a_ → agent_access, axp_u_ → user_access.
+        """
+        if self._exchanger:
+            is_agent_pat = self.token.startswith("axp_a_")
+            if is_agent_pat and self.agent_id:
+                jwt = self._exchanger.get_token(
+                    "agent_access",
+                    agent_id=self.agent_id,
+                    scope="messages tasks context agents spaces search",
+                )
+            else:
+                jwt = self._exchanger.get_token(
+                    "user_access",
+                    scope="messages tasks context agents spaces search",
+                )
+            return {**self._base_headers, "Authorization": f"Bearer {jwt}"}
+        return self._base_headers
+
     def _with_agent(self, agent_id: str | None) -> dict:
-        """Add X-Agent-Id header if targeting an agent."""
-        if agent_id:
-            return {**self._headers, "X-Agent-Id": agent_id}
-        return self._headers
+        """Get auth headers, targeting agent if specified.
+
+        With exchange auth: agent_id is used in exchange parameters (frozen in JWT).
+        Without exchange auth: falls back to X-Agent-Id header (legacy).
+        """
+        headers = self._auth_headers(for_agent=bool(agent_id or self.agent_id))
+        # Legacy path only: add X-Agent-Id header for non-exchange auth
+        if agent_id and not self._use_exchange:
+            headers["X-Agent-Id"] = agent_id
+        return headers
 
     def _parse_json(self, r: httpx.Response) -> dict:
         """Parse JSON response, raising a clear error if HTML is returned."""
