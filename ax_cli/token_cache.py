@@ -132,6 +132,7 @@ class TokenExchanger:
         agent_id: str | None = None,
         audience: str = "ax-api",
         scope: str = "messages tasks context agents spaces search",
+        force_refresh: bool = False,
     ) -> str:
         """Get a valid JWT, using cache or exchanging if needed."""
         if not self.pat_key_id:
@@ -139,10 +140,11 @@ class TokenExchanger:
 
         key = _cache_key(self.pat_key_id, token_class, agent_id, audience, scope)
 
-        # Check cache
-        cached = self._cache.get(key)
-        if cached and cached.get("exp", 0) > time.time() + _REFRESH_BUFFER:
-            return cached["access_token"]
+        # Check cache (skip if force_refresh)
+        if not force_refresh:
+            cached = self._cache.get(key)
+            if cached and cached.get("exp", 0) > time.time() + _REFRESH_BUFFER:
+                return cached["access_token"]
 
         # Exchange
         jwt_data = self._exchange(token_class, agent_id=agent_id, audience=audience, scope=scope)

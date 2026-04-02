@@ -87,6 +87,62 @@ def _check_honeypot(token: str, base_url: str) -> None:
             return
 
 
+class _RetryOnAuthClient:
+    """Wraps httpx.Client to retry on 401 with fresh JWT + exponential backoff.
+
+    Intercepts all HTTP methods. On 401:
+    1. Clear cached JWT, force re-exchange
+    2. Retry with backoff (0.5s, 1s, 2s)
+    3. Give up after 3 retries
+    """
+
+    _MAX_RETRIES = 3
+    _BACKOFF_BASE = 1.0  # seconds — retries at 1s, 2s, 4s
+
+    def __init__(self, inner: httpx.Client, get_fresh_jwt):
+        self._inner = inner
+        self._get_fresh_jwt = get_fresh_jwt
+
+    def _retry(self, method: str, *args, **kwargs) -> httpx.Response:
+        r = getattr(self._inner, method)(*args, **kwargs)
+        if r.status_code != 401 or not self._get_fresh_jwt:
+            return r
+
+        import time as _time
+        for attempt in range(self._MAX_RETRIES):
+            backoff = self._BACKOFF_BASE * (2 ** attempt)
+            _time.sleep(backoff)
+            fresh_jwt = self._get_fresh_jwt()
+            headers = kwargs.get("headers") or {}
+            headers["Authorization"] = f"Bearer {fresh_jwt}"
+            kwargs["headers"] = headers
+            r = getattr(self._inner, method)(*args, **kwargs)
+            if r.status_code != 401:
+                return r
+        return r  # final 401 after all retries
+
+    def get(self, *args, **kwargs):
+        return self._retry("get", *args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        return self._retry("post", *args, **kwargs)
+
+    def put(self, *args, **kwargs):
+        return self._retry("put", *args, **kwargs)
+
+    def patch(self, *args, **kwargs):
+        return self._retry("patch", *args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        return self._retry("delete", *args, **kwargs)
+
+    def stream(self, *args, **kwargs):
+        return self._inner.stream(*args, **kwargs)
+
+    def close(self):
+        self._inner.close()
+
+
 class AxClient:
     def __init__(self, base_url: str, token: str, *, agent_name: str | None = None,
                  agent_id: str | None = None):
@@ -118,9 +174,27 @@ class AxClient:
         if not self._use_exchange:
             self._base_headers["Authorization"] = f"Bearer {token}"
 
-        self._http = httpx.Client(
+        inner = httpx.Client(
             base_url=self.base_url, headers=self._base_headers, timeout=30.0,
             event_hooks={"request": [self._inject_auth]} if self._use_exchange else {},
+        )
+        # Wrap with 401 retry — on auth failure, force re-exchange and retry with backoff
+        get_fresh = (lambda: self._get_jwt(force_refresh=True)) if self._use_exchange else None
+        self._http = _RetryOnAuthClient(inner, get_fresh)
+
+    def _get_jwt(self, *, force_refresh: bool = False) -> str:
+        """Get a JWT from the exchanger with appropriate token class."""
+        is_agent_pat = self.token.startswith("axp_a_")
+        if is_agent_pat and self.agent_id:
+            return self._exchanger.get_token(
+                "agent_access", agent_id=self.agent_id,
+                scope="messages tasks context agents spaces search",
+                force_refresh=force_refresh,
+            )
+        return self._exchanger.get_token(
+            "user_access",
+            scope="messages tasks context agents spaces search",
+            force_refresh=force_refresh,
         )
 
     def _inject_auth(self, request: httpx.Request) -> None:
@@ -134,18 +208,8 @@ class AxClient:
         - axp_u_ (user PAT) → user_access always (even if agent_id in config)
         """
         if self._exchanger and "Authorization" not in request.headers:
-            is_agent_pat = self.token.startswith("axp_a_")
-            if is_agent_pat and self.agent_id:
-                jwt = self._exchanger.get_token(
-                    "agent_access", agent_id=self.agent_id,
-                    scope="messages tasks context agents spaces search",
-                )
-            else:
-                jwt = self._exchanger.get_token(
-                    "user_access",
-                    scope="messages tasks context agents spaces search",
-                )
-            request.headers["Authorization"] = f"Bearer {jwt}"
+            request.headers["Authorization"] = f"Bearer {self._get_jwt()}"
+
 
     def _auth_headers(self, *, for_agent: bool = False) -> dict:
         """Get headers with a fresh JWT from exchange, or static token.
