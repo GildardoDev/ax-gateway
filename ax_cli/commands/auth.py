@@ -93,69 +93,118 @@ def init(
     cfg["token"] = token
     cfg["base_url"] = base_url
 
-    # Step 1: Verify token works by exchanging it
+    is_enrollment = token.startswith("axp_a_")
     console.print(f"\n[cyan]Connecting to {base_url}...[/cyan]")
-    try:
-        from ..token_cache import TokenExchanger
-        exchanger = TokenExchanger(base_url, token)
-        jwt = exchanger.get_token("user_access", scope="messages tasks context agents spaces search")
-        console.print("[green]Token verified.[/green] Exchange successful.")
-    except Exception as e:
-        console.print(f"[red]Token verification failed:[/red] {e}")
-        console.print("Check that the token is valid and the URL is correct.")
-        raise typer.Exit(1)
 
-    # Step 2: Discover identity
-    try:
-        from ..client import AxClient
-        client = AxClient(base_url=base_url, token=token)
-        me = client.whoami()
-        username = me.get("username", "unknown")
-        console.print(f"[green]Identity:[/green] {username} ({me.get('email', '')})")
+    if is_enrollment:
+        # --- Enrollment token flow: register agent + bind ---
+        resolved_name = agent_name or agent_id
+        if not resolved_name:
+            console.print("[yellow]This is an enrollment token (axp_a_).[/yellow]")
+            console.print("It will create a new agent and bind to it.")
+            console.print("")
+            resolved_name = typer.prompt("Agent name")
 
-        # Check for bound agent
-        bound = me.get("bound_agent")
-        if bound:
-            cfg["agent_id"] = bound.get("agent_id", "")
-            cfg["agent_name"] = bound.get("agent_name", "")
-            if bound.get("default_space_id"):
-                cfg["space_id"] = bound["default_space_id"]
-            console.print(f"[green]Bound agent:[/green] {bound.get('agent_name')} ({bound.get('agent_id', '')[:12]}...)")
-    except Exception:
-        pass
-
-    # Step 3: Discover spaces (if not already set)
-    if not cfg.get("space_id") and not space_id:
+        console.print(f"[cyan]Registering agent '{resolved_name}'...[/cyan]")
         try:
-            spaces = client.list_spaces()
-            space_list = spaces.get("spaces", spaces) if isinstance(spaces, dict) else spaces
-            if isinstance(space_list, list) and len(space_list) == 1:
-                cfg["space_id"] = str(space_list[0].get("id"))
-                console.print(f"[green]Space:[/green] {space_list[0].get('name')} (auto-selected, only one)")
-            elif isinstance(space_list, list) and len(space_list) > 1:
-                console.print(f"\n[yellow]Multiple spaces found ({len(space_list)}):[/yellow]")
-                for i, s in enumerate(space_list):
-                    console.print(f"  {i+1}. {s.get('name')} — {s.get('id')}")
-                console.print("  Use --space-id to select one, or set AX_SPACE_ID.")
+            r = httpx.post(
+                f"{base_url}/auth/exchange",
+                json={
+                    "requested_token_class": "agent_access",
+                    "scope": "messages tasks context agents spaces search",
+                    "audience": "ax-api",
+                    "agent_name": resolved_name,
+                },
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                timeout=15.0,
+            )
+            r.raise_for_status()
+            data = r.json()
+            cfg["agent_id"] = data.get("agent_id", "")
+            cfg["agent_name"] = data.get("agent_name", resolved_name)
+            console.print(f"[green]Agent registered:[/green] {cfg['agent_name']} ({cfg['agent_id'][:12]}...)")
+            console.print(f"[green]Token bound.[/green] Exchange successful.")
+        except httpx.HTTPStatusError as e:
+            try:
+                detail = e.response.json().get("detail", {})
+                msg = detail.get("message", str(detail)) if isinstance(detail, dict) else str(detail)
+            except Exception:
+                msg = str(e)
+            console.print(f"[red]Registration failed:[/red] {msg}")
+            raise typer.Exit(1)
+        except Exception as e:
+            console.print(f"[red]Registration failed:[/red] {e}")
+            raise typer.Exit(1)
+
+        # Discover space from the JWT we just got
+        try:
+            from ..client import AxClient
+            client = AxClient(base_url=base_url, token=token, agent_id=cfg.get("agent_id"))
+            me = client.whoami()
+            bound = me.get("bound_agent")
+            if bound and bound.get("default_space_id"):
+                cfg["space_id"] = bound["default_space_id"]
+                console.print(f"[green]Space:[/green] {bound.get('default_space_name', cfg['space_id'][:12])}")
         except Exception:
             pass
 
-    # Step 4: Discover agents (if not already set)
-    if not cfg.get("agent_id") and not agent_id:
+    else:
+        # --- User token flow: discover identity + spaces + agents ---
         try:
-            agents_data = client.list_agents()
-            agent_list = agents_data.get("agents", agents_data) if isinstance(agents_data, dict) else agents_data
-            if isinstance(agent_list, list) and len(agent_list) > 0:
-                console.print(f"\n[cyan]Available agents ({len(agent_list)}):[/cyan]")
-                for a in agent_list[:10]:
-                    status = a.get("status", "?")
-                    console.print(f"  {a.get('name')} — {a.get('id')} [{status}]")
-                if len(agent_list) == 1:
+            from ..token_cache import TokenExchanger
+            exchanger = TokenExchanger(base_url, token)
+            exchanger.get_token("user_access", scope="messages tasks context agents spaces search")
+            console.print("[green]Token verified.[/green] Exchange successful.")
+        except Exception as e:
+            console.print(f"[red]Token verification failed:[/red] {e}")
+            console.print("Check that the token is valid and the URL is correct.")
+            raise typer.Exit(1)
+
+        try:
+            from ..client import AxClient
+            client = AxClient(base_url=base_url, token=token)
+            me = client.whoami()
+            username = me.get("username", "unknown")
+            console.print(f"[green]Identity:[/green] {username} ({me.get('email', '')})")
+
+            bound = me.get("bound_agent")
+            if bound:
+                cfg["agent_id"] = bound.get("agent_id", "")
+                cfg["agent_name"] = bound.get("agent_name", "")
+                if bound.get("default_space_id"):
+                    cfg["space_id"] = bound["default_space_id"]
+                console.print(f"[green]Bound agent:[/green] {bound.get('agent_name')} ({bound.get('agent_id', '')[:12]}...)")
+        except Exception:
+            pass
+
+        # Discover spaces
+        if not cfg.get("space_id") and not space_id:
+            try:
+                spaces = client.list_spaces()
+                space_list = spaces.get("spaces", spaces) if isinstance(spaces, dict) else spaces
+                if isinstance(space_list, list) and len(space_list) == 1:
+                    cfg["space_id"] = str(space_list[0].get("id"))
+                    console.print(f"[green]Space:[/green] {space_list[0].get('name')} (auto-selected)")
+                elif isinstance(space_list, list) and len(space_list) > 1:
+                    console.print(f"\n[yellow]{len(space_list)} spaces found.[/yellow] Use --space-id to pick one:")
+                    for s in space_list[:5]:
+                        console.print(f"  {s.get('name')} — {s.get('id')}")
+            except Exception:
+                pass
+
+        # Discover agents
+        if not cfg.get("agent_id") and not agent_id:
+            try:
+                agents_data = client.list_agents()
+                agent_list = agents_data.get("agents", agents_data) if isinstance(agents_data, dict) else agents_data
+                if isinstance(agent_list, list) and len(agent_list) == 1:
                     cfg["agent_id"] = str(agent_list[0].get("id"))
                     cfg["agent_name"] = agent_list[0].get("name", "")
-                    console.print(f"[green]Agent:[/green] {agent_list[0].get('name')} (auto-selected, only one)")
-        except Exception:
-            pass
+                    console.print(f"[green]Agent:[/green] {agent_list[0].get('name')} (auto-selected)")
+                elif isinstance(agent_list, list) and len(agent_list) > 1:
+                    console.print(f"\n[cyan]{len(agent_list)} agents available.[/cyan] Use --agent-id to pick one.")
+            except Exception:
+                pass
 
     # Apply explicit overrides
     if agent_name:
