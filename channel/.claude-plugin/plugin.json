@@ -1,0 +1,13 @@
+{
+  "name": "ax-channel",
+  "description": "Connect Claude Code to the aX agent network — receive messages, coordinate with other agents, and reply from your session.",
+  "version": "0.1.0",
+  "keywords": [
+    "ax",
+    "channel",
+    "agents",
+    "multi-agent",
+    "mcp",
+    "collaboration"
+  ]
+}

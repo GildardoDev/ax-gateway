@@ -14,21 +14,47 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
 
-// --- Config from env ---
-const TOKEN_FILE =
-  process.env.AX_TOKEN_FILE ?? `${process.env.HOME}/.ax/user_token`;
-const BASE_URL = process.env.AX_BASE_URL ?? "https://next.paxai.app";
-const AGENT_NAME = process.env.AX_AGENT_NAME ?? "relay";
-const AGENT_ID = process.env.AX_AGENT_ID ?? "";
-const SPACE_ID = process.env.AX_SPACE_ID ?? "";
+// --- Load .env from ~/.claude/channels/ax-channel/.env as fallback ---
+function loadDotEnv(): Record<string, string> {
+  const envPath = join(homedir(), ".claude", "channels", "ax-channel", ".env");
+  if (!existsSync(envPath)) return {};
+  const vars: Record<string, string> = {};
+  for (const line of readFileSync(envPath, "utf-8").split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq > 0) vars[trimmed.slice(0, eq)] = trimmed.slice(eq + 1);
+  }
+  return vars;
+}
+
+const dotenv = loadDotEnv();
+function cfg(key: string, fallback: string): string {
+  return process.env[key] ?? dotenv[key] ?? fallback;
+}
+
+// --- Config: env vars > .env file > defaults ---
+const BASE_URL = cfg("AX_BASE_URL", "https://next.paxai.app");
+const AGENT_NAME = cfg("AX_AGENT_NAME", "");
+const AGENT_ID = cfg("AX_AGENT_ID", "");
+const SPACE_ID = cfg("AX_SPACE_ID", "");
 
 function loadToken(): string {
+  // Direct token in env or .env
+  const direct = cfg("AX_TOKEN", "");
+  if (direct) return direct;
+  // Token file path
+  const tokenFile = cfg("AX_TOKEN_FILE", join(homedir(), ".ax", "user_token"));
   try {
-    return readFileSync(TOKEN_FILE, "utf-8").trim();
+    return readFileSync(tokenFile, "utf-8").trim();
   } catch {
-    throw new Error(`Cannot read token from ${TOKEN_FILE}`);
+    throw new Error(
+      `No AX_TOKEN set and cannot read token file at ${tokenFile}. Run /ax-channel:configure <token> to set up.`
+    );
   }
 }
 
@@ -366,8 +392,25 @@ log(
 log(`space: ${SPACE_ID}`);
 log(`api: ${BASE_URL}`);
 
-startSSE(jwt, AGENT_NAME, resolvedAgentId, (mention) => {
+startSSE(jwt, AGENT_NAME, resolvedAgentId, async (mention) => {
   lastMessageId = mention.id;
+
+  // Ack immediately so the sender knows we received it
+  try {
+    const ackJwt = await ensureJwt();
+    await sendMessage(
+      ackJwt,
+      resolvedAgentId,
+      SPACE_ID,
+      `Received — working on it...`,
+      mention.id
+    );
+    log(`ack sent for ${mention.id.slice(0, 12)}`);
+  } catch (err) {
+    log(`ack failed: ${err}`);
+  }
+
+  // Deliver to Claude Code session
   void mcp.notification({
     method: "notifications/claude/channel",
     params: {
