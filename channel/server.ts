@@ -294,6 +294,41 @@ let lastMessageId: string | null = null;
 let currentJwt: string = "";
 let resolvedAgentId: string | null = null;
 let jwtTime = 0;
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
+const HEARTBEAT_TIMEOUT = 300_000; // 5 minutes — stop if no reply
+
+function startHeartbeat(messageId: string) {
+  stopHeartbeat();
+  const start = Date.now();
+  let count = 0;
+  heartbeatTimer = setInterval(async () => {
+    count++;
+    const elapsed = Math.round((Date.now() - start) / 1000);
+    if (Date.now() - start > HEARTBEAT_TIMEOUT) {
+      stopHeartbeat();
+      try {
+        const jwt = await ensureJwt();
+        await sendMessage(jwt, resolvedAgentId, SPACE_ID, `No response after ${Math.round(elapsed / 60)}m — session may need attention.`, messageId);
+      } catch {}
+      return;
+    }
+    try {
+      const jwt = await ensureJwt();
+      await sendMessage(jwt, resolvedAgentId, SPACE_ID, `Still working... (${elapsed}s)`, messageId);
+      log(`heartbeat #${count} for ${messageId.slice(0, 12)}`);
+    } catch (err) {
+      log(`heartbeat failed: ${err}`);
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
 
 async function ensureJwt(): Promise<string> {
   if (currentJwt && Date.now() - jwtTime < 10 * 60 * 1000) return currentJwt;
@@ -359,6 +394,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       text,
       replyTo ?? undefined
     );
+    stopHeartbeat(); // Response sent — stop heartbeat
     return {
       content: [
         {
@@ -409,6 +445,9 @@ startSSE(jwt, AGENT_NAME, resolvedAgentId, async (mention) => {
   } catch (err) {
     log(`ack failed: ${err}`);
   }
+
+  // Start heartbeat — sends "Still working..." every 30s until reply
+  startHeartbeat(mention.id);
 
   // Deliver to Claude Code session
   void mcp.notification({
