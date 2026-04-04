@@ -142,6 +142,30 @@ async function sendMessage(
   return { id: msg.id as string };
 }
 
+// --- Edit message in place ---
+async function editMessage(
+  jwt: string,
+  agentId: string | null,
+  messageId: string,
+  text: string
+): Promise<void> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${jwt}`,
+    "Content-Type": "application/json",
+  };
+  if (agentId) headers["X-Agent-Id"] = agentId;
+
+  const resp = await fetch(`${BASE_URL}/api/v1/messages/${messageId}`, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ content: text }),
+  });
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`edit failed (${resp.status}): ${errText.slice(0, 200)}`);
+  }
+}
+
 // --- SSE Listener ---
 function startSSE(
   jwt: string,
@@ -295,30 +319,32 @@ let currentJwt: string = "";
 let resolvedAgentId: string | null = null;
 let jwtTime = 0;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let ackMessageId: string | null = null; // ID of the ack message to update in place
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
 const HEARTBEAT_TIMEOUT = 300_000; // 5 minutes — stop if no reply
 
-function startHeartbeat(messageId: string) {
+function startHeartbeat(parentMessageId: string) {
   stopHeartbeat();
   const start = Date.now();
   let count = 0;
   heartbeatTimer = setInterval(async () => {
+    if (!ackMessageId) return;
     count++;
     const elapsed = Math.round((Date.now() - start) / 1000);
     if (Date.now() - start > HEARTBEAT_TIMEOUT) {
       stopHeartbeat();
       try {
         const jwt = await ensureJwt();
-        await sendMessage(jwt, resolvedAgentId, SPACE_ID, `No response after ${Math.round(elapsed / 60)}m — session may need attention.`, messageId);
+        await editMessage(jwt, resolvedAgentId, ackMessageId, `No response after ${Math.round(elapsed / 60)}m — session may need attention.`);
       } catch {}
       return;
     }
     try {
       const jwt = await ensureJwt();
-      await sendMessage(jwt, resolvedAgentId, SPACE_ID, `Still working... (${elapsed}s)`, messageId);
-      log(`heartbeat #${count} for ${messageId.slice(0, 12)}`);
+      await editMessage(jwt, resolvedAgentId, ackMessageId, `Working... (${elapsed}s)`);
+      log(`heartbeat #${count} updated ${ackMessageId!.slice(0, 12)}`);
     } catch (err) {
-      log(`heartbeat failed: ${err}`);
+      log(`heartbeat edit failed: ${err}`);
     }
   }, HEARTBEAT_INTERVAL);
 }
@@ -387,19 +413,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
   try {
     const jwt = await ensureJwt();
-    const result = await sendMessage(
-      jwt,
-      resolvedAgentId,
-      SPACE_ID,
-      text,
-      replyTo ?? undefined
-    );
-    stopHeartbeat(); // Response sent — stop heartbeat
+    stopHeartbeat();
+
+    // If we have an ack message, update it in place with the final response
+    // Otherwise create a new message
+    let resultId: string | undefined;
+    if (ackMessageId) {
+      await editMessage(jwt, resolvedAgentId, ackMessageId, text);
+      resultId = ackMessageId;
+      ackMessageId = null;
+    } else {
+      const result = await sendMessage(
+        jwt,
+        resolvedAgentId,
+        SPACE_ID,
+        text,
+        replyTo ?? undefined
+      );
+      resultId = result.id;
+    }
     return {
       content: [
         {
           type: "text" as const,
-          text: `sent${replyTo ? ` reply to ${replyTo}` : ""}${result.id ? ` (${result.id})` : ""}`,
+          text: `sent${replyTo ? ` reply to ${replyTo}` : ""}${resultId ? ` (${resultId})` : ""}`,
         },
       ],
     };
@@ -431,22 +468,24 @@ log(`api: ${BASE_URL}`);
 startSSE(jwt, AGENT_NAME, resolvedAgentId, async (mention) => {
   lastMessageId = mention.id;
 
-  // Ack immediately so the sender knows we received it
+  // Ack immediately — create one message that gets updated in place
   try {
     const ackJwt = await ensureJwt();
-    await sendMessage(
+    const ack = await sendMessage(
       ackJwt,
       resolvedAgentId,
       SPACE_ID,
       `Received — working on it...`,
       mention.id
     );
-    log(`ack sent for ${mention.id.slice(0, 12)}`);
+    ackMessageId = ack.id ?? null;
+    log(`ack sent ${ackMessageId?.slice(0, 12)} for ${mention.id.slice(0, 12)}`);
   } catch (err) {
     log(`ack failed: ${err}`);
+    ackMessageId = null;
   }
 
-  // Start heartbeat — sends "Still working..." every 30s until reply
+  // Start heartbeat — updates the ack message in place
   startHeartbeat(mention.id);
 
   // Deliver to Claude Code session
