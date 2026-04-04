@@ -257,7 +257,12 @@ function startSSE(
     if (!id || seen.has(id)) return;
 
     const content = (data.content as string) ?? "";
-    if (!content.includes(`@${agentName}`)) return;
+    const parentId = (data.parent_id as string) ?? "";
+
+    // Match if: explicit @mention OR reply to one of our sent messages
+    const hasMention = content.includes(`@${agentName}`);
+    const isReplyToUs = parentId && sentMessageIds.has(parentId);
+    if (!hasMention && !isReplyToUs) return;
 
     // Self-filter
     const author = data.author as string | Record<string, unknown>;
@@ -332,6 +337,10 @@ type QueuedMention = {
 };
 const mentionQueue: QueuedMention[] = [];
 const QUEUE_MAX = 100;
+
+// Track our sent message IDs so we can detect replies to us
+const sentMessageIds = new Set<string>();
+const SENT_MAX = 200;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let ackMessageId: string | null = null; // ID of the ack message to update in place
 const HEARTBEAT_INTERVAL = 30_000; // 30 seconds
@@ -493,6 +502,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       );
       resultId = result.id;
     }
+    // Track sent message so we detect replies to it
+    if (resultId) {
+      sentMessageIds.add(resultId);
+      if (sentMessageIds.size > SENT_MAX) {
+        const arr = [...sentMessageIds];
+        sentMessageIds.clear();
+        for (const x of arr.slice(-SENT_MAX / 2)) sentMessageIds.add(x);
+      }
+    }
     return {
       content: [
         {
@@ -544,6 +562,7 @@ startSSE(ensureJwt, AGENT_NAME, resolvedAgentId, async (mention) => {
       mention.id
     );
     ackMessageId = ack.id ?? null;
+    if (ackMessageId) sentMessageIds.add(ackMessageId);
     log(`ack sent ${ackMessageId?.slice(0, 12)} for ${mention.id.slice(0, 12)}`);
   } catch (err) {
     log(`ack failed: ${err}`);
