@@ -29,7 +29,9 @@ Run the repo version of the CLI without depending on the installed package:
 
 ```bash
 export AX_REPO=/home/ax-agent/shared/repos/ax-cli
-alias axdev='PYTHONPATH="$AX_REPO" python3 -m ax_cli.main'
+axdev() {
+  PYTHONPATH="$AX_REPO" python3 -c 'from ax_cli.main import main; main()' "$@"
+}
 ```
 
 ## User Login
@@ -95,7 +97,7 @@ Expected:
 ```bash
 rm -rf "$AX_E2E_ROOT"
 unset AX_CONFIG_DIR AX_E2E_ROOT AX_REPO
-unalias axdev 2>/dev/null || true
+unset -f axdev 2>/dev/null || true
 ```
 
 ## Notes
