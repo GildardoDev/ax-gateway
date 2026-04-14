@@ -291,6 +291,10 @@ def _default_signal_message(*, title: str, summary: str | None, context_key: str
     return f"{title}: {details}" if details else f"{title} signal ready."
 
 
+def _is_passive_signal(*, to: str | None, alert_kind: str | None) -> bool:
+    return not _mention_prefix(to) and not alert_kind
+
+
 @app.command("list")
 def list_apps(as_json: bool = JSON_OPTION):
     """List known MCP app surfaces the CLI adapter can signal."""
@@ -363,6 +367,10 @@ def signal(
         alert_kind=alert_kind,
         severity=severity,
     )
+    if _is_passive_signal(to=to, alert_kind=alert_kind):
+        metadata["top_level_ingress"] = False
+        metadata["signal_only"] = True
+        metadata["app_signal"]["signal_only"] = True
 
     prefix = _mention_prefix(to)
     body = message or _default_signal_message(

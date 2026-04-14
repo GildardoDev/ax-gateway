@@ -99,6 +99,8 @@ def test_apps_signal_writes_context_widget_metadata(monkeypatch):
     assert widget["initial_data"]["selected_key"] == "design:architecture"
     assert widget["initial_data"]["items"][0]["file_content"] == "# Architecture\n"
     assert metadata["alert"]["kind"] == "design_review"
+    assert "top_level_ingress" not in metadata
+    assert "signal_only" not in metadata
 
     output = json.loads(result.output)
     assert output["message"]["id"] == "msg-1"
@@ -249,3 +251,6 @@ def test_apps_signal_whoami_builds_identity_widget_payload(monkeypatch):
     }
     assert initial_data["data"]["context"]["workspace_name"] == "madtank's Workspace"
     assert initial_data["data"]["context"]["owner"]["handle"] == "madtank"
+    assert calls["message"]["metadata"]["top_level_ingress"] is False
+    assert calls["message"]["metadata"]["signal_only"] is True
+    assert calls["message"]["metadata"]["app_signal"]["signal_only"] is True
