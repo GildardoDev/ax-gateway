@@ -72,6 +72,80 @@ axctl auth whoami --json
 The generated agent profile/config is what Claude Code Channel, headless MCP,
 MCP Jam, and long-running agents should use.
 
+## Gateway MVP
+
+`ax gateway` is the first local control-plane runtime for ax-cli. It keeps the
+bootstrap user PAT in one trusted local place, mints agent PATs on demand, and
+supervises managed runtimes so the child process never needs the raw PAT or JWT.
+
+The first slice starts headless, but it now includes a live terminal operator
+view:
+
+```bash
+# 1. Store the Gateway bootstrap login
+ax gateway login
+
+# 2. Register a managed echo bot
+ax gateway agents add echo-bot --type echo
+
+# 3. Run the local Gateway supervisor
+ax gateway run
+```
+
+In another shell or device:
+
+```bash
+ax send --to echo-bot "ping" --no-wait
+ax gateway status
+ax gateway watch
+ax gateway agents show echo-bot
+```
+
+`ax gateway status` now shows recent control-plane activity as well as managed
+runtime state, and Gateway-authored replies carry control-plane metadata so
+operator attribution is less ambiguous during dogfooding.
+
+`ax gateway watch` is the first dashboard-style operator surface: a live
+terminal view with Gateway health, fleet counts, managed-agent roster, and
+recent control-plane events. `ax gateway agents show <name>` gives the first
+drill-in view for one managed runtime.
+
+Runtime support starts with:
+
+- `echo` — built-in ping/echo bot for proving the control plane.
+- `inbox` — a connected inbox/queue identity that receives replies without
+  auto-responding. Useful for demos, operator testing, and sender/receiver
+  workflows.
+- `exec` — Gateway-owned per-mention command execution. This is the bridge for
+  Hermes-style handlers without handing platform credentials to the child
+  process.
+
+Managed `exec` runtimes can now emit structured progress lines back to Gateway
+while they are still working. The bridge prints lines prefixed with
+`AX_GATEWAY_EVENT ` and Gateway turns them into control-plane activity,
+`agent_processing`, and tool-call audit notifications.
+
+Example: connect the local Codex CLI as a managed runtime for `@codex`:
+
+```bash
+ax gateway agents add codex \
+  --type exec \
+  --exec "python3 examples/codex_gateway/codex_bridge.py" \
+  --workdir /absolute/path/to/ax-cli
+```
+
+Example: add a second connected sender identity and use it to message `@codex`
+without creating an agent-to-agent reply loop:
+
+```bash
+ax gateway agents add codex-gateway-inbox --type inbox
+ax gateway agents send codex-gateway-inbox "pause for 8 seconds and narrate activity" --to codex
+```
+
+This is a compatibility-first Gateway: today it still uses agent PATs against
+the existing platform APIs, but the Gateway owns those credentials centrally so
+managed runtimes do not.
+
 ## Claude Code Channel — Connect from Anywhere
 
 **The first multi-agent channel for Claude Code.** Send a message from your phone, Claude Code receives it in real-time, delegates work to specialist agents, and reports back.
@@ -483,6 +557,10 @@ returned messages have actually been handled.
 | Command | Description |
 |---------|-------------|
 | `axctl login` | Set up or refresh the user login token without touching agent config |
+| `ax gateway login` | Store the local Gateway bootstrap session |
+| `ax gateway status` | Show Gateway daemon + managed runtime status |
+| `ax gateway agents show NAME` | Drill into one managed agent |
+| `ax gateway agents send NAME "msg" --to codex` | Send as a managed agent identity |
 | `ax auth whoami` | Current identity + profile + fingerprint |
 | `ax agents list` | List agents in the space |
 | `ax spaces list` | List spaces you belong to |
@@ -496,6 +574,9 @@ returned messages have actually been handled.
 | Command | Description |
 |---------|-------------|
 | `ax events stream` | Raw SSE event stream |
+| `ax gateway run` | Run the local Gateway supervisor |
+| `ax gateway watch` | Live Gateway dashboard in the terminal |
+| `ax gateway agents add NAME --type inbox` | Add a connected inbox-only managed agent |
 | `ax listen --exec "./bot"` | Listen for @mentions with handler |
 | `ax watch --mention` | Block until condition matches on SSE |
 
