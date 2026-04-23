@@ -47,8 +47,7 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
             "id": "exec",
             "label": "Command Bridge",
             "description": (
-                "Gateway-owned command execution for bridges and adapters that print "
-                "AX_GATEWAY_EVENT lines."
+                "Gateway-owned command execution for bridges and adapters that print AX_GATEWAY_EVENT lines."
             ),
             "kind": "exec",
             "passive": False,
@@ -100,6 +99,85 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
                 "tools": "Gateway can record tool usage when the bridge emits tool events.",
             },
         },
+        "hermes_sentinel": {
+            "id": "hermes_sentinel",
+            "label": "Hermes Sentinel",
+            "description": (
+                "Gateway-supervised long-running Hermes sentinel using the original "
+                "claude_agent_v2.py listener semantics."
+            ),
+            "kind": "supervised_process",
+            "passive": False,
+            "requires": [],
+            "form_fields": [
+                {
+                    "name": "workdir",
+                    "label": "Workdir",
+                    "required": True,
+                    "placeholder": "/home/ax-agent/agents/dev_sentinel",
+                },
+                {
+                    "name": "model",
+                    "label": "Model",
+                    "required": False,
+                    "placeholder": "codex:gpt-5.5",
+                },
+            ],
+            "examples": [
+                {
+                    "label": "Hermes dev sentinel",
+                    "runtime_type": "hermes_sentinel",
+                    "workdir": "/home/ax-agent/agents/dev_sentinel",
+                    "note": "Gateway starts the old listener once and monitors it; Hermes owns session continuity.",
+                },
+            ],
+            "signals": {
+                **_shared_signals(),
+                "activity": (
+                    "Gateway reports process liveness; the sentinel listener emits the same processing "
+                    "and tool activity signals as the pre-Gateway setup."
+                ),
+                "tools": "Tool telemetry comes from claude_agent_v2.py/Hermes callbacks, not a one-shot bridge.",
+            },
+        },
+        "sentinel_cli": {
+            "id": "sentinel_cli",
+            "label": "Sentinel CLI",
+            "description": (
+                "Gateway-owned listener with the original sentinel CLI runner semantics: "
+                "session resume, queueing, and parsed Claude/Codex tool activity."
+            ),
+            "kind": "builtin",
+            "passive": False,
+            "requires": [],
+            "form_fields": [
+                {
+                    "name": "workdir",
+                    "label": "Workdir",
+                    "required": False,
+                    "placeholder": str(repo_root),
+                },
+                {
+                    "name": "model",
+                    "label": "Model",
+                    "required": False,
+                    "placeholder": "opus or gpt-5.4",
+                },
+            ],
+            "examples": [
+                {
+                    "label": "Claude sentinel",
+                    "runtime_type": "sentinel_cli",
+                    "workdir": str(repo_root),
+                    "note": "Uses Claude CLI by default and resumes the same session for agent-level continuity.",
+                },
+            ],
+            "signals": {
+                **_shared_signals(),
+                "activity": "Gateway parses Claude/Codex JSON streams and emits working, thinking, and tool phases.",
+                "tools": "Codex command events are recorded as tool calls; Claude tool-use blocks are surfaced as live tool activity.",
+            },
+        },
         "inbox": {
             "id": "inbox",
             "label": "Passive Inbox",
@@ -130,14 +208,17 @@ def runtime_type_definition(runtime_type: str) -> dict[str, Any]:
 
 def runtime_type_list() -> list[dict[str, Any]]:
     catalog = runtime_type_catalog()
-    ordered_ids = ["echo", "exec", "inbox"]
+    ordered_ids = ["echo", "exec", "hermes_sentinel", "sentinel_cli", "inbox"]
     return [catalog[runtime_id] for runtime_id in ordered_ids if runtime_id in catalog]
 
 
 def agent_template_catalog() -> dict[str, dict[str, Any]]:
     repo_root = _repo_root()
     skill_path = _gateway_setup_skill_path()
-    runtime_signals = {key: runtime_type_definition(key)["signals"] for key in ("echo", "exec", "inbox")}
+    runtime_signals = {
+        key: runtime_type_definition(key)["signals"]
+        for key in ("echo", "exec", "hermes_sentinel", "sentinel_cli", "inbox")
+    }
     return {
         "echo_test": {
             "id": "echo_test",
@@ -200,19 +281,19 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
         },
         "hermes": {
             "id": "hermes",
-            "label": "Hermes",
-            "description": "Local Hermes agent bridge with strong activity and tool telemetry.",
-            "availability": "setup_required",
+            "label": "Hermes Sentinel",
+            "description": "Long-running Hermes coding sentinel managed by Gateway.",
+            "availability": "ready",
             "launchable": True,
-            "runtime_type": "exec",
+            "runtime_type": "hermes_sentinel",
             "asset_class": "interactive_agent",
             "intake_model": "live_listener",
             "trigger_sources": ["direct_message"],
             "return_paths": ["inline_reply"],
             "telemetry_shape": "rich",
             "suggested_name": "hermes-bot",
-            "operator_summary": "Best path for a capable local agent with tool use and rich progress.",
-            "recommended_test_message": "Pause for 5 seconds, narrate activity as you go, and end with: Gateway test OK.",
+            "operator_summary": "Best path for a capable coding agent with continuity and rich progress.",
+            "recommended_test_message": "Remember the word cobalt, reply briefly, then I will ask you what word I gave you.",
             "what_you_need": [
                 "A local hermes-agent checkout, usually at ~/hermes-agent or via HERMES_REPO_PATH.",
                 "Hermes auth or model credentials such as ~/.hermes/auth.json or provider env vars.",
@@ -220,14 +301,44 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "setup_skill": "gateway-agent-setup",
             "setup_skill_path": str(skill_path),
             "defaults": {
-                "runtime_type": "exec",
-                "exec_command": "python3 examples/hermes_sentinel/hermes_bridge.py",
+                "runtime_type": "hermes_sentinel",
                 "workdir": str(repo_root),
             },
-            "signals": runtime_signals["exec"],
+            "signals": runtime_signals["hermes_sentinel"],
             "advanced": {
-                "adapter_label": "Gateway command bridge",
-                "supports_command_override": True,
+                "adapter_label": "Gateway-supervised Hermes listener",
+                "supports_command_override": False,
+            },
+        },
+        "sentinel_cli": {
+            "id": "sentinel_cli",
+            "label": "Sentinel CLI",
+            "description": "Original aX sentinel runner pattern managed by Gateway.",
+            "availability": "ready",
+            "launchable": True,
+            "runtime_type": "sentinel_cli",
+            "asset_class": "interactive_agent",
+            "intake_model": "live_listener",
+            "trigger_sources": ["direct_message"],
+            "return_paths": ["inline_reply"],
+            "telemetry_shape": "rich",
+            "suggested_name": "dev-sentinel",
+            "operator_summary": "Best fit for long-lived coding sentinels that need session continuity and tool activity.",
+            "recommended_test_message": "Remember the word cobalt, reply briefly, then I will ask you what word I gave you.",
+            "what_you_need": [
+                "Claude CLI or Codex CLI installed and authenticated on this machine.",
+                "A workdir containing the sentinel's local instructions.",
+            ],
+            "setup_skill": "gateway-agent-setup",
+            "setup_skill_path": str(skill_path),
+            "defaults": {
+                "runtime_type": "sentinel_cli",
+                "workdir": str(repo_root),
+            },
+            "signals": runtime_signals["sentinel_cli"],
+            "advanced": {
+                "adapter_label": "Gateway sentinel CLI runner",
+                "supports_command_override": False,
             },
         },
         "claude_code_channel": {
@@ -306,7 +417,7 @@ def agent_template_definition(template_id: str) -> dict[str, Any]:
 
 def agent_template_list(*, include_advanced: bool = False) -> list[dict[str, Any]]:
     catalog = agent_template_catalog()
-    ordered_ids = ["echo_test", "ollama", "hermes", "claude_code_channel", "inbox"]
+    ordered_ids = ["echo_test", "ollama", "hermes", "sentinel_cli", "claude_code_channel", "inbox"]
     templates = [catalog[template_id] for template_id in ordered_ids if template_id in catalog]
     if include_advanced:
         return templates

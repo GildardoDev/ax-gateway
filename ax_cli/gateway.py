@@ -17,6 +17,7 @@ import platform
 import queue
 import re
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -76,17 +77,50 @@ _CONTROLLED_LIVENESS = {"connected", "stale", "offline", "setup_error"}
 _CONTROLLED_WORK_STATES = {"idle", "queued", "working", "blocked"}
 _CONTROLLED_REPLY_MODES = {"interactive", "background", "summary_only", "silent"}
 _CONTROLLED_TELEMETRY_LEVELS = {"rich", "basic", "silent"}
-_CONTROLLED_ASSET_CLASSES = {"interactive_agent", "background_worker", "scheduled_job", "alert_listener", "service_proxy"}
-_CONTROLLED_INTAKE_MODELS = {"live_listener", "launch_on_send", "queue_accept", "queue_drain", "scheduled_run", "event_triggered", "manual_only"}
-_CONTROLLED_TRIGGER_SOURCES = {"direct_message", "queued_job", "scheduled_invocation", "external_alert", "manual_trigger", "tool_call"}
+_CONTROLLED_ASSET_CLASSES = {
+    "interactive_agent",
+    "background_worker",
+    "scheduled_job",
+    "alert_listener",
+    "service_proxy",
+}
+_CONTROLLED_INTAKE_MODELS = {
+    "live_listener",
+    "launch_on_send",
+    "queue_accept",
+    "queue_drain",
+    "scheduled_run",
+    "event_triggered",
+    "manual_only",
+}
+_CONTROLLED_TRIGGER_SOURCES = {
+    "direct_message",
+    "queued_job",
+    "scheduled_invocation",
+    "external_alert",
+    "manual_trigger",
+    "tool_call",
+}
 _CONTROLLED_RETURN_PATHS = {"inline_reply", "sender_inbox", "summary_post", "task_update", "event_log", "silent"}
 _CONTROLLED_TELEMETRY_SHAPES = {"rich", "basic", "heartbeat_only", "opaque"}
 _CONTROLLED_WORKER_MODELS = {"queue_drain"}
 _CONTROLLED_ATTESTATION_STATES = {"verified", "drifted", "unknown", "blocked"}
 _CONTROLLED_APPROVAL_STATES = {"not_required", "pending", "approved", "rejected"}
-_CONTROLLED_IDENTITY_STATUSES = {"verified", "unknown_identity", "credential_mismatch", "fallback_blocked", "bootstrap_only", "blocked"}
+_CONTROLLED_IDENTITY_STATUSES = {
+    "verified",
+    "unknown_identity",
+    "credential_mismatch",
+    "fallback_blocked",
+    "bootstrap_only",
+    "blocked",
+}
 _CONTROLLED_SPACE_STATUSES = {"active_allowed", "active_not_allowed", "no_active_space", "unknown"}
-_CONTROLLED_ENVIRONMENT_STATUSES = {"environment_allowed", "environment_mismatch", "environment_unknown", "environment_blocked"}
+_CONTROLLED_ENVIRONMENT_STATUSES = {
+    "environment_allowed",
+    "environment_mismatch",
+    "environment_unknown",
+    "environment_blocked",
+}
 _CONTROLLED_ACTIVE_SPACE_SOURCES = {"explicit_request", "gateway_binding", "visible_default", "none"}
 _CONTROLLED_MODES = {"LIVE", "ON-DEMAND", "INBOX"}
 _CONTROLLED_PRESENCE = {"IDLE", "QUEUED", "WORKING", "BLOCKED", "STALE", "OFFLINE", "ERROR"}
@@ -119,7 +153,16 @@ _CONTROLLED_CONFIDENCE_REASONS = {
     "unknown",
     "other",
 }
-_WORKING_STATUSES = {"accepted", "started", "processing", "thinking", "tool_call", "tool_started", "streaming", "working"}
+_WORKING_STATUSES = {
+    "accepted",
+    "started",
+    "processing",
+    "thinking",
+    "tool_call",
+    "tool_started",
+    "streaming",
+    "working",
+}
 _BLOCKED_STATUSES = {"rate_limited"}
 
 
@@ -227,6 +270,12 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
             "reply_mode": "interactive",
             "telemetry_level": "rich",
         },
+        "sentinel_cli": {
+            "placement": "hosted",
+            "activation": "persistent",
+            "reply_mode": "interactive",
+            "telemetry_level": "rich",
+        },
         "claude_code_channel": {
             "placement": "attached",
             "activation": "attach_only",
@@ -253,6 +302,18 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
             "reply_mode": "interactive",
             "telemetry_level": "basic",
         },
+        "hermes_sentinel": {
+            "placement": "hosted",
+            "activation": "persistent",
+            "reply_mode": "interactive",
+            "telemetry_level": "rich",
+        },
+        "sentinel_cli": {
+            "placement": "hosted",
+            "activation": "persistent",
+            "reply_mode": "interactive",
+            "telemetry_level": "rich",
+        },
         "inbox": {
             "placement": "mailbox",
             "activation": "queue_worker",
@@ -260,7 +321,9 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
             "telemetry_level": "basic",
         },
     }
-    return dict(defaults_by_template.get(template_key) or defaults_by_runtime.get(runtime_key) or defaults_by_runtime["exec"])
+    return dict(
+        defaults_by_template.get(template_key) or defaults_by_runtime.get(runtime_key) or defaults_by_runtime["exec"]
+    )
 
 
 def _template_asset_defaults(template_id: str | None, runtime_type: object) -> dict[str, Any]:
@@ -312,6 +375,21 @@ def _template_asset_defaults(template_id: str | None, runtime_type: object) -> d
             "capabilities": ["reply", "progress", "tool_events"],
             "constraints": ["requires-repo", "requires-provider-auth"],
         },
+        "sentinel_cli": {
+            "asset_class": "interactive_agent",
+            "intake_model": "live_listener",
+            "trigger_sources": ["direct_message"],
+            "return_paths": ["inline_reply"],
+            "telemetry_shape": "rich",
+            "worker_model": None,
+            "addressable": True,
+            "messageable": True,
+            "schedulable": False,
+            "externally_triggered": False,
+            "tags": ["local", "live-listener", "hosted-by-gateway", "sentinel-cli", "rich-telemetry"],
+            "capabilities": ["reply", "progress", "tool_events", "session_resume"],
+            "constraints": ["requires-cli-auth"],
+        },
         "claude_code_channel": {
             "asset_class": "interactive_agent",
             "intake_model": "live_listener",
@@ -360,9 +438,13 @@ def _template_asset_defaults(template_id: str | None, runtime_type: object) -> d
             "capabilities": ["reply"],
             "constraints": [],
         },
+        "hermes_sentinel": defaults_by_template["hermes"],
+        "sentinel_cli": defaults_by_template["sentinel_cli"],
         "inbox": defaults_by_template["inbox"],
     }
-    resolved = defaults_by_template.get(template_key) or defaults_by_runtime.get(runtime_key) or defaults_by_runtime["exec"]
+    resolved = (
+        defaults_by_template.get(template_key) or defaults_by_runtime.get(runtime_key) or defaults_by_runtime["exec"]
+    )
     return {
         "asset_class": resolved["asset_class"],
         "intake_model": resolved["intake_model"],
@@ -411,8 +493,12 @@ def _output_label(return_paths: list[str]) -> str:
     }.get(primary, "Reply")
 
 
-def infer_asset_descriptor(snapshot: dict[str, Any], *, operator_profile: dict[str, str] | None = None) -> dict[str, Any]:
-    defaults = _template_asset_defaults(str(snapshot.get("template_id") or "").strip() or None, snapshot.get("runtime_type"))
+def infer_asset_descriptor(
+    snapshot: dict[str, Any], *, operator_profile: dict[str, str] | None = None
+) -> dict[str, Any]:
+    defaults = _template_asset_defaults(
+        str(snapshot.get("template_id") or "").strip() or None, snapshot.get("runtime_type")
+    )
     overrides = _override_fields(snapshot, domain="asset")
     telemetry_fallback = defaults["telemetry_shape"]
     if operator_profile:
@@ -424,20 +510,28 @@ def infer_asset_descriptor(snapshot: dict[str, Any], *, operator_profile: dict[s
 
     asset_class = defaults["asset_class"]
     if "asset_class" in overrides:
-        asset_class = _normalized_controlled(snapshot.get("asset_class"), _CONTROLLED_ASSET_CLASSES, fallback=defaults["asset_class"])
+        asset_class = _normalized_controlled(
+            snapshot.get("asset_class"), _CONTROLLED_ASSET_CLASSES, fallback=defaults["asset_class"]
+        )
 
     intake_model = defaults["intake_model"]
     if "intake_model" in overrides:
-        intake_model = _normalized_controlled(snapshot.get("intake_model"), _CONTROLLED_INTAKE_MODELS, fallback=defaults["intake_model"])
+        intake_model = _normalized_controlled(
+            snapshot.get("intake_model"), _CONTROLLED_INTAKE_MODELS, fallback=defaults["intake_model"]
+        )
 
     worker_model = defaults.get("worker_model")
     if "worker_model" in overrides:
-        worker_model = _normalized_optional_controlled(snapshot.get("worker_model"), _CONTROLLED_WORKER_MODELS) or defaults.get("worker_model")
+        worker_model = _normalized_optional_controlled(
+            snapshot.get("worker_model"), _CONTROLLED_WORKER_MODELS
+        ) or defaults.get("worker_model")
 
     trigger_sources = list(defaults["trigger_sources"])
     if "trigger_sources" in overrides or "trigger_source" in overrides:
         trigger_sources = _normalized_controlled_list(
-            snapshot.get("trigger_sources") if snapshot.get("trigger_sources") is not None else snapshot.get("trigger_source"),
+            snapshot.get("trigger_sources")
+            if snapshot.get("trigger_sources") is not None
+            else snapshot.get("trigger_source"),
             _CONTROLLED_TRIGGER_SOURCES,
             fallback=defaults["trigger_sources"],
         )
@@ -471,9 +565,16 @@ def infer_asset_descriptor(snapshot: dict[str, Any], *, operator_profile: dict[s
         constraints = _normalized_string_list(snapshot.get("constraints"), fallback=defaults["constraints"])
 
     descriptor = {
-        "asset_id": str(snapshot.get("asset_id") or snapshot.get("agent_id") or snapshot.get("name") or "").strip() or None,
+        "asset_id": str(snapshot.get("asset_id") or snapshot.get("agent_id") or snapshot.get("name") or "").strip()
+        or None,
         "gateway_id": str(snapshot.get("gateway_id") or "").strip() or None,
-        "display_name": str(snapshot.get("display_name") or snapshot.get("name") or snapshot.get("template_label") or snapshot.get("runtime_type") or "Managed Asset"),
+        "display_name": str(
+            snapshot.get("display_name")
+            or snapshot.get("name")
+            or snapshot.get("template_label")
+            or snapshot.get("runtime_type")
+            or "Managed Asset"
+        ),
         "asset_class": asset_class,
         "intake_model": intake_model,
         "worker_model": worker_model,
@@ -489,7 +590,9 @@ def infer_asset_descriptor(snapshot: dict[str, Any], *, operator_profile: dict[s
         "schedulable": _bool_with_fallback(snapshot.get("schedulable"), fallback=defaults["schedulable"])
         if "schedulable" in overrides
         else defaults["schedulable"],
-        "externally_triggered": _bool_with_fallback(snapshot.get("externally_triggered"), fallback=defaults["externally_triggered"])
+        "externally_triggered": _bool_with_fallback(
+            snapshot.get("externally_triggered"), fallback=defaults["externally_triggered"]
+        )
         if "externally_triggered" in overrides
         else defaults["externally_triggered"],
         "tags": tags,
@@ -530,6 +633,8 @@ def _hermes_repo_candidates(entry: dict[str, Any] | None = None) -> list[Path]:
     if workdir_raw:
         workdir = Path(workdir_raw).expanduser()
         add(workdir.parent / "hermes-agent")
+        if str(workdir).startswith("/home/ax-agent/agents"):
+            add("/home/ax-agent/shared/repos/hermes-agent")
 
     add(Path.home() / "hermes-agent")
     return candidates
@@ -537,7 +642,8 @@ def _hermes_repo_candidates(entry: dict[str, Any] | None = None) -> list[Path]:
 
 def hermes_setup_status(entry: dict[str, Any]) -> dict[str, Any]:
     template_id = str(entry.get("template_id") or "").strip().lower()
-    if template_id != "hermes":
+    runtime_type = str(entry.get("runtime_type") or "").strip().lower()
+    if template_id != "hermes" and runtime_type != "hermes_sentinel":
         return {"ready": True, "template_id": template_id}
 
     candidates = _hermes_repo_candidates(entry)
@@ -558,8 +664,7 @@ def hermes_setup_status(entry: dict[str, Any]) -> dict[str, Any]:
         "expected_path": str(expected),
         "summary": f"Hermes checkout not found at {expected}.",
         "detail": (
-            f"Hermes checkout not found at {expected}. "
-            "Set HERMES_REPO_PATH or clone hermes-agent to ~/hermes-agent."
+            f"Hermes checkout not found at {expected}. Set HERMES_REPO_PATH or clone hermes-agent to ~/hermes-agent."
         ),
     }
 
@@ -677,16 +782,24 @@ def ollama_setup_status(*, preferred_model: str | None = None) -> dict[str, Any]
 
 
 def infer_operator_profile(snapshot: dict[str, Any]) -> dict[str, str]:
-    defaults = _template_operator_defaults(str(snapshot.get("template_id") or "").strip() or None, snapshot.get("runtime_type"))
+    defaults = _template_operator_defaults(
+        str(snapshot.get("template_id") or "").strip() or None, snapshot.get("runtime_type")
+    )
     overrides = _override_fields(snapshot, domain="operator")
     return {
-        "placement": _normalized_controlled(snapshot.get("placement"), _CONTROLLED_PLACEMENTS, fallback=defaults["placement"])
+        "placement": _normalized_controlled(
+            snapshot.get("placement"), _CONTROLLED_PLACEMENTS, fallback=defaults["placement"]
+        )
         if "placement" in overrides
         else defaults["placement"],
-        "activation": _normalized_controlled(snapshot.get("activation"), _CONTROLLED_ACTIVATIONS, fallback=defaults["activation"])
+        "activation": _normalized_controlled(
+            snapshot.get("activation"), _CONTROLLED_ACTIVATIONS, fallback=defaults["activation"]
+        )
         if "activation" in overrides
         else defaults["activation"],
-        "reply_mode": _normalized_controlled(snapshot.get("reply_mode"), _CONTROLLED_REPLY_MODES, fallback=defaults["reply_mode"])
+        "reply_mode": _normalized_controlled(
+            snapshot.get("reply_mode"), _CONTROLLED_REPLY_MODES, fallback=defaults["reply_mode"]
+        )
         if "reply_mode" in overrides
         else defaults["reply_mode"],
         "telemetry_level": _normalized_controlled(
@@ -724,10 +837,14 @@ def _derive_liveness(snapshot: dict[str, Any], *, raw_state: str, last_seen_age:
 
 
 def _derive_work_state(snapshot: dict[str, Any], *, liveness: str) -> str:
-    attestation_state = _normalized_optional_controlled(snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES)
+    attestation_state = _normalized_optional_controlled(
+        snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES
+    )
     approval_state = _normalized_optional_controlled(snapshot.get("approval_state"), _CONTROLLED_APPROVAL_STATES)
     identity_status = _normalized_optional_controlled(snapshot.get("identity_status"), _CONTROLLED_IDENTITY_STATUSES)
-    environment_status = _normalized_optional_controlled(snapshot.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES)
+    environment_status = _normalized_optional_controlled(
+        snapshot.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES
+    )
     space_status = _normalized_optional_controlled(snapshot.get("space_status"), _CONTROLLED_SPACE_STATUSES)
     if liveness == "setup_error":
         return "blocked"
@@ -759,7 +876,9 @@ def _doctor_has_failed(snapshot: dict[str, Any]) -> bool:
         return True
     checks = result.get("checks")
     if isinstance(checks, list):
-        return any(isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed" for item in checks)
+        return any(
+            isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed" for item in checks
+        )
     return False
 
 
@@ -796,10 +915,14 @@ def _derive_reply(reply_mode: str) -> str:
 
 
 def _derive_reachability(*, snapshot: dict[str, Any], mode: str, liveness: str, activation: str) -> str:
-    attestation_state = _normalized_optional_controlled(snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES)
+    attestation_state = _normalized_optional_controlled(
+        snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES
+    )
     approval_state = _normalized_optional_controlled(snapshot.get("approval_state"), _CONTROLLED_APPROVAL_STATES)
     identity_status = _normalized_optional_controlled(snapshot.get("identity_status"), _CONTROLLED_IDENTITY_STATUSES)
-    environment_status = _normalized_optional_controlled(snapshot.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES)
+    environment_status = _normalized_optional_controlled(
+        snapshot.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES
+    )
     space_status = _normalized_optional_controlled(snapshot.get("space_status"), _CONTROLLED_SPACE_STATUSES)
     if liveness == "setup_error":
         return "unavailable"
@@ -827,7 +950,11 @@ def _setup_error_detail(snapshot: dict[str, Any]) -> str:
         summary = _doctor_summary(snapshot)
         if summary:
             return summary
-    return str(snapshot.get("last_error") or snapshot.get("last_reply_preview") or "Setup must be fixed before Gateway can send work.")
+    return str(
+        snapshot.get("last_error")
+        or snapshot.get("last_reply_preview")
+        or "Setup must be fixed before Gateway can send work."
+    )
 
 
 def _doctor_summary(snapshot: dict[str, Any]) -> str:
@@ -839,7 +966,11 @@ def _doctor_summary(snapshot: dict[str, Any]) -> str:
         return summary
     checks = result.get("checks")
     if isinstance(checks, list):
-        failed = [str(item.get("name") or "").strip() for item in checks if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed"]
+        failed = [
+            str(item.get("name") or "").strip()
+            for item in checks
+            if isinstance(item, dict) and str(item.get("status") or "").strip().lower() == "failed"
+        ]
         if failed:
             return f"Doctor failed: {', '.join(filter(None, failed))}."
     return ""
@@ -852,27 +983,56 @@ def _derive_confidence(
     liveness: str,
     reachability: str,
 ) -> tuple[str, str, str]:
-    attestation_state = _normalized_optional_controlled(snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES)
+    attestation_state = _normalized_optional_controlled(
+        snapshot.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES
+    )
     approval_state = _normalized_optional_controlled(snapshot.get("approval_state"), _CONTROLLED_APPROVAL_STATES)
-    governance_reason = _normalized_optional_controlled(snapshot.get("confidence_reason"), _CONTROLLED_CONFIDENCE_REASONS)
-    governance_detail = str(snapshot.get("confidence_detail") or "").strip() or "Gateway blocked this runtime until its binding is approved."
+    governance_reason = _normalized_optional_controlled(
+        snapshot.get("confidence_reason"), _CONTROLLED_CONFIDENCE_REASONS
+    )
+    governance_detail = (
+        str(snapshot.get("confidence_detail") or "").strip()
+        or "Gateway blocked this runtime until its binding is approved."
+    )
     identity_status = _normalized_optional_controlled(snapshot.get("identity_status"), _CONTROLLED_IDENTITY_STATUSES)
-    environment_status = _normalized_optional_controlled(snapshot.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES)
+    environment_status = _normalized_optional_controlled(
+        snapshot.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES
+    )
     space_status = _normalized_optional_controlled(snapshot.get("space_status"), _CONTROLLED_SPACE_STATUSES)
     if liveness == "setup_error":
         return ("BLOCKED", "setup_blocked", _setup_error_detail(snapshot))
     if identity_status == "unknown_identity":
-        return ("BLOCKED", "identity_unbound", "Gateway does not have a bound acting identity for this asset in the requested environment.")
+        return (
+            "BLOCKED",
+            "identity_unbound",
+            "Gateway does not have a bound acting identity for this asset in the requested environment.",
+        )
     if identity_status in {"credential_mismatch", "fallback_blocked"}:
-        return ("BLOCKED", "identity_mismatch", "Gateway blocked a mismatched acting identity instead of borrowing another identity.")
+        return (
+            "BLOCKED",
+            "identity_mismatch",
+            "Gateway blocked a mismatched acting identity instead of borrowing another identity.",
+        )
     if identity_status == "bootstrap_only":
-        return ("BLOCKED", "bootstrap_only", "Gateway bootstrap credentials can only be used for setup, verification, or repair flows.")
+        return (
+            "BLOCKED",
+            "bootstrap_only",
+            "Gateway bootstrap credentials can only be used for setup, verification, or repair flows.",
+        )
     if environment_status == "environment_mismatch":
-        return ("BLOCKED", "environment_mismatch", "Requested environment does not match the bound Gateway environment for this asset.")
+        return (
+            "BLOCKED",
+            "environment_mismatch",
+            "Requested environment does not match the bound Gateway environment for this asset.",
+        )
     if environment_status == "environment_blocked":
         return ("BLOCKED", "environment_mismatch", "Gateway blocked this asset in the requested environment.")
     if space_status == "active_not_allowed":
-        return ("BLOCKED", "active_space_not_allowed", "The resolved target space is not allowed for this acting identity.")
+        return (
+            "BLOCKED",
+            "active_space_not_allowed",
+            "The resolved target space is not allowed for this acting identity.",
+        )
     if space_status == "no_active_space":
         return ("BLOCKED", "no_active_space", "Gateway does not have an active space selected for this asset.")
     if space_status == "unknown":
@@ -931,7 +1091,7 @@ def _binding_type_for_entry(entry: dict[str, Any]) -> str:
 
 
 def _launch_spec_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    return {
+    launch_spec = {
         "runtime_type": str(entry.get("runtime_type") or "").strip() or None,
         "template_id": str(entry.get("template_id") or "").strip() or None,
         "command": str(entry.get("exec_command") or "").strip() or None,
@@ -939,6 +1099,16 @@ def _launch_spec_for_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "ollama_model": str(entry.get("ollama_model") or "").strip() or None,
         "transport": str(entry.get("transport") or "").strip() or None,
     }
+    model = str(
+        entry.get("hermes_model")
+        or entry.get("sentinel_model")
+        or entry.get("runtime_model")
+        or entry.get("model")
+        or ""
+    ).strip()
+    if model:
+        launch_spec["model"] = model
+    return launch_spec
 
 
 def _payload_hash(payload: dict[str, Any]) -> str:
@@ -1025,7 +1195,12 @@ def _fallback_allowed_spaces(entry: dict[str, Any], session: dict[str, Any] | No
         rows.append(
             {
                 "space_id": default_id,
-                "name": str(entry.get("default_space_name") or entry.get("space_name") or session.get("space_name") or default_id),
+                "name": str(
+                    entry.get("default_space_name")
+                    or entry.get("space_name")
+                    or session.get("space_name")
+                    or default_id
+                ),
                 "is_default": True,
             }
         )
@@ -1060,7 +1235,9 @@ def _binding_candidate_for_entry(entry: dict[str, Any], registry: dict[str, Any]
         "path": path,
         "launch_spec": launch_spec,
         "launch_spec_hash": _payload_hash(launch_spec),
-        "created_from": str(entry.get("created_from") or ("ax_template" if entry.get("template_id") else "custom_bridge")),
+        "created_from": str(
+            entry.get("created_from") or ("ax_template" if entry.get("template_id") else "custom_bridge")
+        ),
         "created_via": str(entry.get("created_via") or "cli"),
         "approved_state": str(entry.get("approved_state") or "approved"),
         "first_seen_at": str(entry.get("first_seen_at") or _now_iso()),
@@ -1142,15 +1319,27 @@ def find_identity_binding(
             continue
         if gateway_id and str(binding.get("gateway_id") or "") != gateway_id:
             continue
-        if normalized_base_url and _normalized_base_url(((binding.get("environment") or {}) if isinstance(binding.get("environment"), dict) else {}).get("base_url")) != normalized_base_url:
+        if (
+            normalized_base_url
+            and _normalized_base_url(
+                ((binding.get("environment") or {}) if isinstance(binding.get("environment"), dict) else {}).get(
+                    "base_url"
+                )
+            )
+            != normalized_base_url
+        ):
             continue
         return binding
     return None
 
 
-def _identity_bindings_for_asset(registry: dict[str, Any], asset_id: str, *, gateway_id: str | None = None) -> list[dict[str, Any]]:
+def _identity_bindings_for_asset(
+    registry: dict[str, Any], asset_id: str, *, gateway_id: str | None = None
+) -> list[dict[str, Any]]:
     _ensure_registry_lists(registry)
-    rows = [binding for binding in registry.get("identity_bindings", []) if str(binding.get("asset_id") or "") == asset_id]
+    rows = [
+        binding for binding in registry.get("identity_bindings", []) if str(binding.get("asset_id") or "") == asset_id
+    ]
     if gateway_id:
         rows = [binding for binding in rows if str(binding.get("gateway_id") or "") == gateway_id]
     return rows
@@ -1161,15 +1350,25 @@ def upsert_identity_binding(registry: dict[str, Any], binding: dict[str, Any]) -
     bindings = registry["identity_bindings"]
     target_id = str(binding.get("identity_binding_id") or "")
     target_install_id = str(binding.get("install_id") or "")
-    target_base_url = _normalized_base_url(((binding.get("environment") or {}) if isinstance(binding.get("environment"), dict) else {}).get("base_url"))
+    target_base_url = _normalized_base_url(
+        ((binding.get("environment") or {}) if isinstance(binding.get("environment"), dict) else {}).get("base_url")
+    )
     for idx, existing in enumerate(bindings):
-        existing_base_url = _normalized_base_url(((existing.get("environment") or {}) if isinstance(existing.get("environment"), dict) else {}).get("base_url"))
+        existing_base_url = _normalized_base_url(
+            ((existing.get("environment") or {}) if isinstance(existing.get("environment"), dict) else {}).get(
+                "base_url"
+            )
+        )
         if target_id and str(existing.get("identity_binding_id") or "") == target_id:
             merged = dict(existing)
             merged.update(binding)
             bindings[idx] = merged
             return merged
-        if target_install_id and str(existing.get("install_id") or "") == target_install_id and existing_base_url == target_base_url:
+        if (
+            target_install_id
+            and str(existing.get("install_id") or "") == target_install_id
+            and existing_base_url == target_base_url
+        ):
             merged = dict(existing)
             merged.update(binding)
             bindings[idx] = merged
@@ -1245,23 +1444,33 @@ def ensure_gateway_identity_binding(
             allowed_spaces = fetched
     if not allowed_spaces:
         allowed_spaces = _fallback_allowed_spaces(entry, session=session)
-    default_space_id = str(
-        entry.get("default_space_id")
-        or ((existing or {}).get("default_space_id") if isinstance(existing, dict) else "")
-        or next((item.get("space_id") for item in allowed_spaces if bool(item.get("is_default"))), None)
-        or entry.get("space_id")
-        or (session or {}).get("space_id")
-        or ""
-    ).strip() or None
-    active_space_id = str(
-        entry.get("active_space_id")
-        or ((existing or {}).get("active_space_id") if isinstance(existing, dict) else "")
-        or entry.get("space_id")
-        or default_space_id
-        or ""
-    ).strip() or None
-    default_space_name = _space_name_from_cache(allowed_spaces, default_space_id) or str(entry.get("default_space_name") or entry.get("space_name") or default_space_id or "")
-    active_space_name = _space_name_from_cache(allowed_spaces, active_space_id) or str(entry.get("active_space_name") or entry.get("space_name") or active_space_id or "")
+    default_space_id = (
+        str(
+            entry.get("default_space_id")
+            or ((existing or {}).get("default_space_id") if isinstance(existing, dict) else "")
+            or next((item.get("space_id") for item in allowed_spaces if bool(item.get("is_default"))), None)
+            or entry.get("space_id")
+            or (session or {}).get("space_id")
+            or ""
+        ).strip()
+        or None
+    )
+    active_space_id = (
+        str(
+            entry.get("active_space_id")
+            or ((existing or {}).get("active_space_id") if isinstance(existing, dict) else "")
+            or entry.get("space_id")
+            or default_space_id
+            or ""
+        ).strip()
+        or None
+    )
+    default_space_name = _space_name_from_cache(allowed_spaces, default_space_id) or str(
+        entry.get("default_space_name") or entry.get("space_name") or default_space_id or ""
+    )
+    active_space_name = _space_name_from_cache(allowed_spaces, active_space_id) or str(
+        entry.get("active_space_name") or entry.get("space_name") or active_space_id or ""
+    )
     binding = {
         "identity_binding_id": str((existing or {}).get("identity_binding_id") or f"idbind_{str(uuid.uuid4())}"),
         "asset_id": asset_id,
@@ -1283,8 +1492,15 @@ def ensure_gateway_identity_binding(
         ),
         "credential_ref": {
             "kind": "token_file" if str(entry.get("token_file") or "").strip() else "unknown",
-            "id": str((existing or {}).get("credential_ref", {}).get("id") if isinstance((existing or {}).get("credential_ref"), dict) else "") or f"cred_{str(entry.get('name') or asset_id or 'asset')}_{_environment_label_for_base_url(base_url)}",
-            "display": "Gateway-managed agent token" if str(entry.get("credential_source") or "gateway") == "gateway" else "Non-gateway credential",
+            "id": str(
+                (existing or {}).get("credential_ref", {}).get("id")
+                if isinstance((existing or {}).get("credential_ref"), dict)
+                else ""
+            )
+            or f"cred_{str(entry.get('name') or asset_id or 'asset')}_{_environment_label_for_base_url(base_url)}",
+            "display": "Gateway-managed agent token"
+            if str(entry.get("credential_source") or "gateway") == "gateway"
+            else "Non-gateway credential",
             "path_redacted": _redacted_path(entry.get("token_file")),
         },
         "active_space_id": active_space_id,
@@ -1328,11 +1544,25 @@ def evaluate_identity_space_binding(
     asset_bindings = _identity_bindings_for_asset(registry, asset_id, gateway_id=gateway_id) if asset_id else []
     fallback_binding = asset_bindings[0] if asset_bindings else None
     acting_identity = (
-        (binding.get("acting_identity") if isinstance(binding, dict) and isinstance(binding.get("acting_identity"), dict) else None)
-        or (fallback_binding.get("acting_identity") if isinstance(fallback_binding, dict) and isinstance(fallback_binding.get("acting_identity"), dict) else None)
+        (
+            binding.get("acting_identity")
+            if isinstance(binding, dict) and isinstance(binding.get("acting_identity"), dict)
+            else None
+        )
+        or (
+            fallback_binding.get("acting_identity")
+            if isinstance(fallback_binding, dict) and isinstance(fallback_binding.get("acting_identity"), dict)
+            else None
+        )
         or {}
     )
-    bound_base_url = _normalized_base_url(((binding.get("environment") or {}) if isinstance(binding, dict) and isinstance(binding.get("environment"), dict) else {}).get("base_url"))
+    bound_base_url = _normalized_base_url(
+        (
+            (binding.get("environment") or {})
+            if isinstance(binding, dict) and isinstance(binding.get("environment"), dict)
+            else {}
+        ).get("base_url")
+    )
     environment_status = "environment_unknown"
     if binding:
         environment_status = "environment_allowed"
@@ -1373,8 +1603,20 @@ def evaluate_identity_space_binding(
         active_space_source = "visible_default"
 
     default_space_id = str((binding or {}).get("default_space_id") or "").strip() or None
-    default_space_name = str((binding or {}).get("default_space_name") or _space_name_from_cache(allowed_spaces, default_space_id) or default_space_id or "").strip() or None
-    active_space_name = _space_name_from_cache(allowed_spaces, active_space_id) or str((binding or {}).get("active_space_name") or active_space_id or "").strip() or None
+    default_space_name = (
+        str(
+            (binding or {}).get("default_space_name")
+            or _space_name_from_cache(allowed_spaces, default_space_id)
+            or default_space_id
+            or ""
+        ).strip()
+        or None
+    )
+    active_space_name = (
+        _space_name_from_cache(allowed_spaces, active_space_id)
+        or str((binding or {}).get("active_space_name") or active_space_id or "").strip()
+        or None
+    )
 
     if not active_space_id:
         space_status = "no_active_space"
@@ -1386,7 +1628,8 @@ def evaluate_identity_space_binding(
         space_status = "active_not_allowed"
 
     return {
-        "identity_binding_id": str((binding or {}).get("identity_binding_id") or entry.get("identity_binding_id") or "") or None,
+        "identity_binding_id": str((binding or {}).get("identity_binding_id") or entry.get("identity_binding_id") or "")
+        or None,
         "asset_id": asset_id or None,
         "gateway_id": gateway_id,
         "install_id": install_id,
@@ -1407,7 +1650,9 @@ def evaluate_identity_space_binding(
         "space_status": space_status,
         "last_space_verification_at": str((binding or {}).get("last_verified_at") or ""),
         "identity_binding_state": str((binding or {}).get("binding_state") or "unbound"),
-        "credential_ref": dict((binding or {}).get("credential_ref") or {}) if isinstance((binding or {}).get("credential_ref"), dict) else None,
+        "credential_ref": dict((binding or {}).get("credential_ref") or {})
+        if isinstance((binding or {}).get("credential_ref"), dict)
+        else None,
     }
 
 
@@ -1479,7 +1724,9 @@ def _refresh_attestation_for_matching_entries(
         entry.update(evaluate_runtime_attestation(registry, entry))
 
 
-def approve_gateway_approval(approval_id: str, *, scope: str = "asset", decided_by: str | None = None) -> dict[str, Any]:
+def approve_gateway_approval(
+    approval_id: str, *, scope: str = "asset", decided_by: str | None = None
+) -> dict[str, Any]:
     normalized_scope = str(scope or "asset").strip().lower()
     if normalized_scope not in {"once", "asset", "gateway"}:
         raise ValueError("Approval scope must be one of: once, asset, gateway.")
@@ -1487,7 +1734,9 @@ def approve_gateway_approval(approval_id: str, *, scope: str = "asset", decided_
     approval = _find_approval_by_id(registry, approval_id)
     if approval is None:
         raise LookupError(f"Approval not found: {approval_id}")
-    candidate_binding = approval.get("candidate_binding") if isinstance(approval.get("candidate_binding"), dict) else None
+    candidate_binding = (
+        approval.get("candidate_binding") if isinstance(approval.get("candidate_binding"), dict) else None
+    )
     if not candidate_binding:
         raise ValueError("Approval is missing its candidate binding.")
     now = _now_iso()
@@ -1562,6 +1811,7 @@ def ensure_local_asset_binding(
     *,
     created_via: str | None = None,
     auto_approve: bool = True,
+    replace_existing: bool = False,
 ) -> dict[str, Any]:
     _ensure_registry_lists(registry)
     gateway_id = _gateway_id_from_registry(registry)
@@ -1570,11 +1820,35 @@ def ensure_local_asset_binding(
     if not install_id:
         install_id = str(uuid.uuid4())
         entry["install_id"] = install_id
-    existing = find_binding(registry, install_id=install_id) or find_binding(registry, asset_id=asset_id, gateway_id=gateway_id)
+    existing = find_binding(registry, install_id=install_id) or find_binding(
+        registry, asset_id=asset_id, gateway_id=gateway_id
+    )
     if existing:
-        entry.setdefault("install_id", str(existing.get("install_id") or install_id))
-        return existing
-    candidate = _binding_candidate_for_entry({**entry, "created_via": created_via or entry.get("created_via")}, registry)
+        entry["install_id"] = str(existing.get("install_id") or install_id)
+        if not replace_existing:
+            return existing
+        candidate = _binding_candidate_for_entry(
+            {**entry, "created_via": created_via or entry.get("created_via")}, registry
+        )
+        candidate["first_seen_at"] = str(existing.get("first_seen_at") or candidate.get("first_seen_at") or _now_iso())
+        if auto_approve:
+            candidate["approved_state"] = "approved"
+            candidate["approved_at"] = _now_iso()
+        binding = upsert_binding(registry, candidate)
+        if str(existing.get("candidate_signature") or "") != str(binding.get("candidate_signature") or ""):
+            _record_governance_activity(
+                "asset_binding_updated",
+                entry=entry,
+                asset_id=asset_id,
+                install_id=entry["install_id"],
+                binding_type=binding.get("binding_type"),
+                gateway_id=gateway_id,
+                path=binding.get("path"),
+            )
+        return binding
+    candidate = _binding_candidate_for_entry(
+        {**entry, "created_via": created_via or entry.get("created_via")}, registry
+    )
     if auto_approve:
         candidate["approved_state"] = "approved"
         candidate["approved_at"] = _now_iso()
@@ -1644,7 +1918,9 @@ def evaluate_runtime_attestation(registry: dict[str, Any], entry: dict[str, Any]
     candidate = _binding_candidate_for_entry(entry, registry)
     latest_approval = _find_approval_for_signature(registry, candidate["candidate_signature"])
 
-    def blocked(reason: str, detail: str, *, approval: dict[str, Any] | None = None, state: str = "blocked") -> dict[str, Any]:
+    def blocked(
+        reason: str, detail: str, *, approval: dict[str, Any] | None = None, state: str = "blocked"
+    ) -> dict[str, Any]:
         return {
             "asset_id": asset_id or None,
             "gateway_id": gateway_id,
@@ -1654,7 +1930,9 @@ def evaluate_runtime_attestation(registry: dict[str, Any], entry: dict[str, Any]
             "runtime_instance_id": str(entry.get("runtime_instance_id") or "") or None,
             "attestation_state": state,
             "drift_reason": reason,
-            "approval_state": "rejected" if approval and _approval_status(approval) == "rejected" else ("pending" if approval and _approval_status(approval) == "pending" else "not_required"),
+            "approval_state": "rejected"
+            if approval and _approval_status(approval) == "rejected"
+            else ("pending" if approval and _approval_status(approval) == "pending" else "not_required"),
             "approval_id": approval.get("approval_id") if approval else None,
             "confidence_reason": reason,
             "confidence_detail": detail,
@@ -1670,11 +1948,15 @@ def evaluate_runtime_attestation(registry: dict[str, Any], entry: dict[str, Any]
         return blocked("asset_mismatch", "Runtime install is bound to a different asset id than the one it claimed.")
 
     if latest_approval and _approval_status(latest_approval) == "rejected":
-        return blocked("approval_denied", "A prior approval request for this runtime binding was denied.", approval=latest_approval)
+        return blocked(
+            "approval_denied", "A prior approval request for this runtime binding was denied.", approval=latest_approval
+        )
 
     if not install_binding:
         if asset_bindings:
-            same_gateway = next((binding for binding in asset_bindings if str(binding.get("gateway_id") or "") == gateway_id), None)
+            same_gateway = next(
+                (binding for binding in asset_bindings if str(binding.get("gateway_id") or "") == gateway_id), None
+            )
             if same_gateway is None:
                 approval = latest_approval or _create_binding_approval(
                     registry,
@@ -1685,7 +1967,12 @@ def evaluate_runtime_attestation(registry: dict[str, Any], entry: dict[str, Any]
                     risk="high",
                     approval_kind="new_gateway",
                 )
-                return blocked("new_gateway", "This asset is requesting access from a new Gateway and needs approval.", approval=approval, state="unknown")
+                return blocked(
+                    "new_gateway",
+                    "This asset is requesting access from a new Gateway and needs approval.",
+                    approval=approval,
+                    state="unknown",
+                )
         approval = latest_approval or _create_binding_approval(
             registry,
             entry,
@@ -1695,7 +1982,12 @@ def evaluate_runtime_attestation(registry: dict[str, Any], entry: dict[str, Any]
             risk="medium",
             approval_kind="new_binding",
         )
-        return blocked("approval_required", "Gateway needs approval before trusting this new asset binding.", approval=approval, state="unknown")
+        return blocked(
+            "approval_required",
+            "Gateway needs approval before trusting this new asset binding.",
+            approval=approval,
+            state="unknown",
+        )
 
     binding = install_binding
     if str(binding.get("gateway_id") or "") != gateway_id:
@@ -1708,7 +2000,12 @@ def evaluate_runtime_attestation(registry: dict[str, Any], entry: dict[str, Any]
             risk="high",
             approval_kind="new_gateway",
         )
-        return blocked("new_gateway", "This asset binding is tied to a different Gateway and needs approval.", approval=approval, state="unknown")
+        return blocked(
+            "new_gateway",
+            "This asset binding is tied to a different Gateway and needs approval.",
+            approval=approval,
+            state="unknown",
+        )
 
     if str(binding.get("approved_state") or "approved").lower() == "rejected":
         return blocked("approval_denied", "This asset binding was previously rejected.")
@@ -1793,11 +2090,10 @@ def annotate_runtime_health(
             resolved_registry = load_gateway_registry()
         except Exception:
             resolved_registry = None
-    if resolved_registry and (
-        resolved_registry.get("identity_bindings")
-        or enriched.get("identity_binding_id")
-    ):
-        identity_space = evaluate_identity_space_binding(resolved_registry, enriched, explicit_space_id=explicit_space_id)
+    if resolved_registry and (resolved_registry.get("identity_bindings") or enriched.get("identity_binding_id")):
+        identity_space = evaluate_identity_space_binding(
+            resolved_registry, enriched, explicit_space_id=explicit_space_id
+        )
         enriched.update(identity_space)
     last_seen_age = _age_seconds(enriched.get("last_seen_at"), now=now)
     last_error_age = _age_seconds(enriched.get("last_listener_error_at"), now=now)
@@ -1822,7 +2118,9 @@ def annotate_runtime_health(
     mode = _derive_mode(profile)
     presence = _derive_presence(mode=mode, liveness=liveness, work_state=work_state)
     reply = _derive_reply(profile["reply_mode"])
-    reachability = _derive_reachability(snapshot=enriched, mode=mode, liveness=liveness, activation=profile["activation"])
+    reachability = _derive_reachability(
+        snapshot=enriched, mode=mode, liveness=liveness, activation=profile["activation"]
+    )
     confidence, confidence_reason, confidence_detail = _derive_confidence(
         enriched,
         mode=mode,
@@ -1831,8 +2129,12 @@ def annotate_runtime_health(
     )
 
     enriched.update(profile)
-    enriched["asset_class"] = _normalized_controlled(asset_descriptor["asset_class"], _CONTROLLED_ASSET_CLASSES, fallback="interactive_agent")
-    enriched["intake_model"] = _normalized_controlled(asset_descriptor["intake_model"], _CONTROLLED_INTAKE_MODELS, fallback="launch_on_send")
+    enriched["asset_class"] = _normalized_controlled(
+        asset_descriptor["asset_class"], _CONTROLLED_ASSET_CLASSES, fallback="interactive_agent"
+    )
+    enriched["intake_model"] = _normalized_controlled(
+        asset_descriptor["intake_model"], _CONTROLLED_INTAKE_MODELS, fallback="launch_on_send"
+    )
     if asset_descriptor.get("worker_model"):
         enriched["worker_model"] = asset_descriptor["worker_model"]
     enriched["trigger_sources"] = list(asset_descriptor.get("trigger_sources") or [])
@@ -1863,12 +2165,22 @@ def annotate_runtime_health(
         fallback="unknown",
     )
     enriched["confidence_detail"] = str(confidence_detail or "").strip() or None
-    enriched["attestation_state"] = _normalized_optional_controlled(enriched.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES)
-    enriched["approval_state"] = _normalized_optional_controlled(enriched.get("approval_state"), _CONTROLLED_APPROVAL_STATES)
-    enriched["identity_status"] = _normalized_optional_controlled(enriched.get("identity_status"), _CONTROLLED_IDENTITY_STATUSES)
+    enriched["attestation_state"] = _normalized_optional_controlled(
+        enriched.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES
+    )
+    enriched["approval_state"] = _normalized_optional_controlled(
+        enriched.get("approval_state"), _CONTROLLED_APPROVAL_STATES
+    )
+    enriched["identity_status"] = _normalized_optional_controlled(
+        enriched.get("identity_status"), _CONTROLLED_IDENTITY_STATUSES
+    )
     enriched["space_status"] = _normalized_optional_controlled(enriched.get("space_status"), _CONTROLLED_SPACE_STATUSES)
-    enriched["environment_status"] = _normalized_optional_controlled(enriched.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES)
-    enriched["active_space_source"] = _normalized_optional_controlled(enriched.get("active_space_source"), _CONTROLLED_ACTIVE_SPACE_SOURCES)
+    enriched["environment_status"] = _normalized_optional_controlled(
+        enriched.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES
+    )
+    enriched["active_space_source"] = _normalized_optional_controlled(
+        enriched.get("active_space_source"), _CONTROLLED_ACTIVE_SPACE_SOURCES
+    )
     enriched["queue_capable"] = profile["placement"] == "mailbox"
     enriched["queue_depth"] = int(enriched.get("backlog_depth") or 0)
     enriched.setdefault("last_successful_doctor_at", None)
@@ -1927,6 +2239,63 @@ def agent_dir(name: str) -> Path:
 
 def agent_token_path(name: str) -> Path:
     return agent_dir(name) / "token"
+
+
+def agent_pending_queue_path(name: str) -> Path:
+    return agent_dir(name) / "pending.json"
+
+
+def _default_pending_queue() -> dict[str, Any]:
+    return {"version": 1, "items": []}
+
+
+def load_agent_pending_messages(name: str) -> list[dict[str, Any]]:
+    payload = _read_json(agent_pending_queue_path(name), default=_default_pending_queue())
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return []
+    return [dict(item) for item in items if isinstance(item, dict)]
+
+
+def save_agent_pending_messages(name: str, items: list[dict[str, Any]]) -> Path:
+    payload = {
+        "version": 1,
+        "items": [dict(item) for item in items if isinstance(item, dict)],
+    }
+    _write_json(agent_pending_queue_path(name), payload)
+    return agent_pending_queue_path(name)
+
+
+def append_agent_pending_message(name: str, message: dict[str, Any]) -> list[dict[str, Any]]:
+    message_id = str(message.get("message_id") or message.get("id") or "").strip()
+    items = load_agent_pending_messages(name)
+    if any(str(item.get("message_id") or "").strip() == message_id for item in items):
+        return items
+    items.append(
+        {
+            "message_id": message_id,
+            "parent_id": str(message.get("parent_id") or "").strip() or None,
+            "conversation_id": str(message.get("conversation_id") or "").strip() or None,
+            "content": str(message.get("content") or ""),
+            "display_name": str(
+                message.get("display_name") or message.get("agent_name") or message.get("sender_name") or ""
+            )
+            or None,
+            "created_at": str(message.get("created_at") or _now_iso()),
+            "queued_at": _now_iso(),
+        }
+    )
+    save_agent_pending_messages(name, items)
+    return items
+
+
+def remove_agent_pending_message(name: str, message_id: str | None) -> list[dict[str, Any]]:
+    target = str(message_id or "").strip()
+    if not target:
+        return load_agent_pending_messages(name)
+    items = [item for item in load_agent_pending_messages(name) if str(item.get("message_id") or "").strip() != target]
+    save_agent_pending_messages(name, items)
+    return items
 
 
 def _default_registry() -> dict[str, Any]:
@@ -2428,6 +2797,283 @@ def _is_passive_runtime(runtime_type: object) -> bool:
     return str(runtime_type or "").lower() in {"inbox", "passive", "monitor"}
 
 
+def _gateway_pickup_activity(runtime_type: object, backlog_depth: int) -> str:
+    if _is_passive_runtime(runtime_type):
+        if backlog_depth > 1:
+            return f"Queued in Gateway ({backlog_depth} pending)"
+        return "Queued in Gateway"
+    if backlog_depth > 1:
+        return f"Picked up by Gateway ({backlog_depth} pending)"
+    return "Picked up by Gateway"
+
+
+def _is_sentinel_cli_runtime(runtime_type: object) -> bool:
+    return str(runtime_type or "").strip().lower() in {"sentinel_cli", "claude_cli", "codex_cli"}
+
+
+def _is_hermes_sentinel_runtime(runtime_type: object) -> bool:
+    return str(runtime_type or "").strip().lower() in {"hermes_sentinel", "hermes_sdk"}
+
+
+def _gateway_repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def _agents_dir_for_entry(entry: dict[str, Any]) -> Path:
+    workdir = Path(str(entry.get("workdir") or "")).expanduser() if str(entry.get("workdir") or "").strip() else None
+    if workdir is not None:
+        return workdir.parent
+    return Path("/home/ax-agent/agents")
+
+
+def _hermes_sentinel_script(entry: dict[str, Any]) -> Path:
+    configured = str(entry.get("sentinel_script") or entry.get("hermes_sentinel_script") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return _agents_dir_for_entry(entry) / "claude_agent_v2.py"
+
+
+def _hermes_sentinel_python(entry: dict[str, Any]) -> str:
+    configured = str(entry.get("hermes_python") or entry.get("python") or "").strip()
+    if configured:
+        return configured
+    hermes_repo = str(entry.get("hermes_repo_path") or "").strip()
+    if hermes_repo:
+        candidate = Path(hermes_repo).expanduser() / ".venv" / "bin" / "python3"
+        if candidate.exists():
+            return str(candidate)
+    default = Path("/home/ax-agent/shared/repos/hermes-agent/.venv/bin/python3")
+    if default.exists():
+        return str(default)
+    return "python3"
+
+
+def _hermes_sentinel_model(entry: dict[str, Any]) -> str:
+    for key in ("hermes_model", "sentinel_model", "runtime_model", "model"):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return value
+    return str(os.environ.get("AX_GATEWAY_HERMES_MODEL") or "codex:gpt-5.5")
+
+
+def _hermes_sentinel_workdir(entry: dict[str, Any]) -> Path:
+    raw = str(entry.get("workdir") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path("/home/ax-agent/agents") / str(entry.get("name") or "agent")
+
+
+def _build_hermes_sentinel_cmd(entry: dict[str, Any]) -> list[str]:
+    timeout = str(entry.get("timeout_seconds") or entry.get("timeout") or 600)
+    update_interval = str(entry.get("update_interval") or 2.0)
+    cmd = [
+        _hermes_sentinel_python(entry),
+        "-u",
+        str(_hermes_sentinel_script(entry)),
+        "--agent",
+        str(entry.get("name") or ""),
+        "--workdir",
+        str(_hermes_sentinel_workdir(entry)),
+        "--timeout",
+        timeout,
+        "--update-interval",
+        update_interval,
+        "--runtime",
+        "hermes_sdk",
+        "--model",
+        _hermes_sentinel_model(entry),
+    ]
+    allowed_tools = str(entry.get("allowed_tools") or "").strip()
+    if allowed_tools:
+        cmd.extend(["--allowed-tools", allowed_tools])
+    system_prompt = str(entry.get("system_prompt") or "").strip()
+    if system_prompt:
+        cmd.extend(["--system-prompt", system_prompt])
+    if _bool_with_fallback(entry.get("disable_codex_mcp"), fallback=False):
+        cmd.append("--disable-codex-mcp")
+    return cmd
+
+
+def _build_hermes_sentinel_env(entry: dict[str, Any]) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in ENV_DENYLIST}
+    token_file = Path(str(entry.get("token_file") or "")).expanduser()
+    token = token_file.read_text().strip() if token_file.exists() else ""
+    workdir = _hermes_sentinel_workdir(entry)
+    agents_dir = _agents_dir_for_entry(entry)
+    hermes_repo = str(entry.get("hermes_repo_path") or "").strip() or "/home/ax-agent/shared/repos/hermes-agent"
+    repo_root = str(_gateway_repo_root())
+
+    env.update(
+        {
+            "AX_TOKEN": token,
+            "AX_BASE_URL": str(entry.get("base_url") or ""),
+            "AX_AGENT_NAME": str(entry.get("name") or ""),
+            "AX_AGENT_ID": str(entry.get("agent_id") or ""),
+            "AX_SPACE_ID": str(entry.get("space_id") or ""),
+            "AX_CONFIG_DIR": str(workdir / ".ax"),
+            "AX_PYTHON": _hermes_sentinel_python(entry),
+            "HERMES_MAX_ITERATIONS": str(
+                entry.get("hermes_max_iterations") or os.environ.get("HERMES_MAX_ITERATIONS") or 30
+            ),
+        }
+    )
+    env.setdefault("AGENT_RUNNER_API_KEY", "staging-dispatch-key")
+    env.setdefault("INTERNAL_DISPATCH_API_KEY", env["AGENT_RUNNER_API_KEY"])
+
+    python_paths = [str(agents_dir), hermes_repo, repo_root]
+    existing_pythonpath = env.get("PYTHONPATH")
+    if existing_pythonpath:
+        python_paths.append(existing_pythonpath)
+    env["PYTHONPATH"] = ":".join(path for path in python_paths if path)
+
+    path_entries = [str(_gateway_repo_root() / ".venv" / "bin"), "/home/ax-agent/shared/repos/ax-cli/.venv/bin"]
+    if env.get("PATH"):
+        path_entries.append(env["PATH"])
+    env["PATH"] = ":".join(path_entries)
+    return env
+
+
+def _sentinel_runtime_name(entry: dict[str, Any]) -> str:
+    runtime_type = str(entry.get("runtime_type") or "").strip().lower()
+    configured = (
+        str(entry.get("sentinel_runtime") or entry.get("runtime_backend") or entry.get("cli_runtime") or "")
+        .strip()
+        .lower()
+    )
+    if configured in {"claude", "claude_cli"}:
+        return "claude"
+    if configured in {"codex", "codex_cli"}:
+        return "codex"
+    if runtime_type == "codex_cli":
+        return "codex"
+    return "claude"
+
+
+def _sentinel_session_scope(entry: dict[str, Any]) -> str:
+    scope = str(entry.get("sentinel_session_scope") or entry.get("session_scope") or "agent").strip().lower()
+    return scope if scope in {"agent", "thread", "message"} else "agent"
+
+
+def _sentinel_session_key(entry: dict[str, Any], data: dict[str, Any] | None, message_id: str) -> str:
+    scope = _sentinel_session_scope(entry)
+    if scope == "message":
+        return message_id or str(uuid.uuid4())
+    if scope == "thread":
+        data = data or {}
+        return str(data.get("parent_id") or data.get("conversation_id") or message_id or "default")
+    return f"space:{entry.get('space_id') or 'unknown'}:agent:{entry.get('name') or 'unknown'}"
+
+
+def _sentinel_model(entry: dict[str, Any], runtime_name: str) -> str | None:
+    runtime_specific_key = "codex_model" if runtime_name == "codex" else "claude_model"
+    for key in ("model", "sentinel_model", f"{runtime_name}_model", runtime_specific_key):
+        value = str(entry.get(key) or "").strip()
+        if value:
+            return value
+    return None
+
+
+def _build_sentinel_claude_cmd(entry: dict[str, Any], session_id: str | None) -> list[str]:
+    cmd = [
+        "claude",
+        "-p",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+        "--add-dir",
+        str(entry.get("add_dir") or "/home/ax-agent/shared/repos"),
+    ]
+    if session_id:
+        cmd.extend(["--resume", session_id])
+    model = _sentinel_model(entry, "claude")
+    if model:
+        cmd.extend(["--model", model])
+    allowed_tools = str(entry.get("allowed_tools") or "").strip()
+    if allowed_tools:
+        cmd.extend(["--allowedTools", allowed_tools])
+    system_prompt = str(entry.get("system_prompt") or "").strip()
+    if system_prompt:
+        cmd.extend(["--append-system-prompt", system_prompt])
+    return cmd
+
+
+def _build_sentinel_codex_cmd(entry: dict[str, Any], session_id: str | None) -> list[str]:
+    workdir = str(entry.get("workdir") or os.getcwd())
+    if session_id:
+        cmd = [
+            "codex",
+            "exec",
+            "resume",
+            session_id,
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-C",
+            workdir,
+        ]
+    else:
+        cmd = [
+            "codex",
+            "exec",
+            "--json",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "--skip-git-repo-check",
+            "-C",
+            workdir,
+        ]
+    if _bool_with_fallback(entry.get("disable_codex_mcp"), fallback=True):
+        cmd.extend(["-c", "mcp_servers.ax-platform.enabled=false"])
+    model = _sentinel_model(entry, "codex")
+    if model:
+        cmd.extend(["-m", model])
+    return cmd
+
+
+def _summarize_sentinel_command(command: str) -> str:
+    short = " ".join(command.split())
+    if len(short) > 90:
+        short = short[:87] + "..."
+
+    lowered = f" {short.lower()} "
+    if "apply_patch" in lowered:
+        return "Applying patch..."
+    if any(token in lowered for token in (" rg ", " grep ", " find ", " fd ", " glob ")):
+        return "Searching codebase..."
+    if any(
+        token in lowered
+        for token in (" sed -n", " cat ", " head ", " tail ", " ls ", " pwd ", " git status", " git diff")
+    ):
+        return "Reading files..."
+    if any(token in lowered for token in (" pytest", " npm test", " pnpm test", " uv run", " cargo test")):
+        return "Running tests..."
+    return f"Running: {short}..."
+
+
+def _sentinel_tool_summary(tool_name: str, tool_input: dict[str, Any]) -> str:
+    lowered = tool_name.lower()
+    if lowered in {"read", "read_file"}:
+        path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+        short = path.rsplit("/", 1)[-1] if "/" in path else path
+        return f"Reading {short}..." if short else "Reading file..."
+    if lowered in {"write", "write_file"}:
+        path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+        short = path.rsplit("/", 1)[-1] if "/" in path else path
+        return f"Writing {short}..." if short else "Writing file..."
+    if lowered in {"edit", "edit_file", "patch"}:
+        path = str(tool_input.get("file_path") or tool_input.get("path") or "")
+        short = path.rsplit("/", 1)[-1] if "/" in path else path
+        return f"Editing {short}..." if short else "Editing file..."
+    if lowered in {"bash", "shell"}:
+        command = str(tool_input.get("command") or "")[:60]
+        return f"Running: {command}..." if command else "Running command..."
+    if lowered in {"grep", "search", "search_files"}:
+        pattern = str(tool_input.get("pattern") or "")
+        return f"Searching: {pattern}..." if pattern else "Searching..."
+    if lowered in {"glob", "glob_files"}:
+        pattern = str(tool_input.get("pattern") or "")
+        return f"Finding files: {pattern}..." if pattern else "Finding files..."
+    return f"Using {tool_name}..."
+
+
 class ManagedAgentRuntime:
     """Listener + worker pair for one managed agent."""
 
@@ -2448,10 +3094,13 @@ class ManagedAgentRuntime:
         self._reply_anchor_ids: set[str] = set()
         self._seen_ids: set[str] = set()
         self._completed_seen_ids: set[str] = set()
+        self._sentinel_sessions: dict[str, str] = {}
         self._state_lock = threading.Lock()
         self._stream_client = None
         self._send_client = None
         self._stream_response = None
+        self._supervised_process: subprocess.Popen | None = None
+        self._supervised_thread: threading.Thread | None = None
         self._state: dict[str, Any] = {
             "effective_state": "stopped",
             "runtime_instance_id": None,
@@ -2535,9 +3184,41 @@ class ManagedAgentRuntime:
 
     def snapshot(self) -> dict[str, Any]:
         with self._state_lock:
+            snapshot = dict(self._state)
+        if not _is_passive_runtime(self.entry.get("runtime_type")):
+            return snapshot
+        registry = load_gateway_registry()
+        stored = find_agent_entry(registry, self.name) or {}
+        pending_items = load_agent_pending_messages(self.name)
+        backlog_depth = len(pending_items)
+        merged = dict(snapshot)
+        for key in (
+            "processed_count",
+            "last_work_completed_at",
+            "last_reply_message_id",
+            "last_reply_preview",
+            "last_received_message_id",
+            "last_work_received_at",
+        ):
+            if key in stored:
+                merged[key] = stored.get(key)
+        merged["backlog_depth"] = backlog_depth
+        merged["current_status"] = "queued" if backlog_depth > 0 else None
+        merged["current_activity"] = (
+            _gateway_pickup_activity(self.entry.get("runtime_type"), backlog_depth)[:240] if backlog_depth > 0 else None
+        )
+        with self._state_lock:
+            self._state.update(merged)
             return dict(self._state)
 
     def start(self) -> None:
+        runtime_type = str(self.entry.get("runtime_type") or "").lower()
+        if (
+            _is_hermes_sentinel_runtime(runtime_type)
+            and self._supervised_process is not None
+            and self._supervised_process.poll() is None
+        ):
+            return
         if self._listener_thread and self._listener_thread.is_alive():
             return
         self.stop_event.clear()
@@ -2545,14 +3226,19 @@ class ManagedAgentRuntime:
         self._reply_anchor_ids = set()
         self._seen_ids = set()
         self._completed_seen_ids = set()
+        self._sentinel_sessions = {}
+        pending_items = load_agent_pending_messages(self.name) if _is_passive_runtime(runtime_type) else []
+        backlog_depth = len(pending_items)
         runtime_instance_id = str(uuid.uuid4())
         self.entry["runtime_instance_id"] = runtime_instance_id
         self._update_state(
             effective_state="starting",
             runtime_instance_id=runtime_instance_id,
-            backlog_depth=0,
-            current_status=None,
-            current_activity=None,
+            backlog_depth=backlog_depth,
+            current_status="queued" if backlog_depth > 0 and _is_passive_runtime(runtime_type) else None,
+            current_activity=_gateway_pickup_activity(runtime_type, backlog_depth)
+            if backlog_depth > 0 and _is_passive_runtime(runtime_type)
+            else None,
             current_tool=None,
             current_tool_call_id=None,
             last_error=None,
@@ -2560,6 +3246,9 @@ class ManagedAgentRuntime:
             last_started_at=_now_iso(),
             reconnect_backoff_seconds=0,
         )
+        if _is_hermes_sentinel_runtime(runtime_type):
+            self._start_hermes_sentinel_process(runtime_instance_id=runtime_instance_id)
+            return
         self._worker_thread = None
         if not _is_passive_runtime(self.entry.get("runtime_type")):
             self._worker_thread = threading.Thread(
@@ -2589,7 +3278,8 @@ class ManagedAgentRuntime:
                 self._stream_response.close()
             except Exception:
                 pass
-        for thread in (self._listener_thread, self._worker_thread):
+        self._stop_hermes_sentinel_process(timeout=timeout)
+        for thread in (self._listener_thread, self._worker_thread, self._supervised_thread):
             if thread and thread.is_alive():
                 thread.join(timeout=timeout)
         for client in (self._stream_client, self._send_client):
@@ -2613,6 +3303,140 @@ class ManagedAgentRuntime:
         )
         record_gateway_activity("runtime_stopped", entry=self.entry)
         self._log("stopped")
+
+    def _hermes_sentinel_log_path(self) -> Path:
+        configured = str(self.entry.get("log_path") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return _hermes_sentinel_workdir(self.entry) / "gateway-hermes-sentinel.log"
+
+    def _start_hermes_sentinel_process(self, *, runtime_instance_id: str) -> None:
+        workdir = _hermes_sentinel_workdir(self.entry)
+        script = _hermes_sentinel_script(self.entry)
+        token_file = Path(str(self.entry.get("token_file") or "")).expanduser()
+        if not script.exists():
+            error = f"Hermes sentinel script not found: {script}"
+            self._update_state(
+                effective_state="error", current_status="error", current_activity=error, last_error=error
+            )
+            record_gateway_activity("runtime_error", entry=self.entry, error=error)
+            return
+        if not token_file.exists() or not token_file.read_text().strip():
+            error = f"Gateway-managed token file is missing or empty: {token_file}"
+            self._update_state(
+                effective_state="error", current_status="error", current_activity=error, last_error=error
+            )
+            record_gateway_activity("runtime_error", entry=self.entry, error=error)
+            return
+
+        workdir.mkdir(parents=True, exist_ok=True)
+        log_path = self._hermes_sentinel_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = _build_hermes_sentinel_cmd(self.entry)
+        env = _build_hermes_sentinel_env(self.entry)
+        try:
+            log_handle = log_path.open("a", encoding="utf-8")
+            log_handle.write(
+                f"\n[{_now_iso()}] Gateway starting Hermes sentinel: {' '.join(shlex.quote(part) for part in cmd)}\n"
+            )
+            log_handle.flush()
+            process = subprocess.Popen(
+                cmd,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                cwd=str(workdir),
+                env=env,
+                start_new_session=True,
+            )
+            log_handle.close()
+        except Exception as exc:
+            error = f"Failed to start Hermes sentinel: {str(exc)[:360]}"
+            self._update_state(
+                effective_state="error", current_status="error", current_activity=error, last_error=error
+            )
+            record_gateway_activity("runtime_error", entry=self.entry, error=error)
+            return
+
+        self._supervised_process = process
+        self._update_state(
+            effective_state="running",
+            current_status=None,
+            current_activity="Hermes sentinel listener running",
+            current_tool=None,
+            current_tool_call_id=None,
+            last_error=None,
+            last_connected_at=_now_iso(),
+            last_seen_at=_now_iso(),
+            reconnect_backoff_seconds=0,
+        )
+        record_gateway_activity(
+            "runtime_started",
+            entry=self.entry,
+            runtime_instance_id=runtime_instance_id,
+            pid=process.pid,
+            log_path=str(log_path),
+            supervised_runtime="hermes_sentinel",
+        )
+        self._supervised_thread = threading.Thread(
+            target=self._monitor_hermes_sentinel_process,
+            daemon=True,
+            name=f"gw-hermes-sentinel-{self.name}",
+        )
+        self._supervised_thread.start()
+        self._log(f"started hermes_sentinel pid={process.pid}")
+
+    def _monitor_hermes_sentinel_process(self) -> None:
+        process = self._supervised_process
+        if process is None:
+            return
+        while not self.stop_event.wait(timeout=5.0):
+            returncode = process.poll()
+            if returncode is None:
+                self._update_state(effective_state="running", last_seen_at=_now_iso(), last_error=None)
+                continue
+            status = "stopped" if returncode == 0 else "error"
+            error = None if returncode == 0 else f"Hermes sentinel exited with code {returncode}"
+            self._update_state(
+                effective_state=status,
+                current_status=None if returncode == 0 else "error",
+                current_activity=None if returncode == 0 else error,
+                current_tool=None,
+                current_tool_call_id=None,
+                last_error=error,
+                last_seen_at=_now_iso(),
+            )
+            record_gateway_activity(
+                "runtime_exited",
+                entry=self.entry,
+                pid=process.pid,
+                exit_code=returncode,
+                error=error,
+            )
+            return
+
+    def _stop_hermes_sentinel_process(self, *, timeout: float = 5.0) -> None:
+        process = self._supervised_process
+        self._supervised_process = None
+        if process is None or process.poll() is not None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=timeout)
+        except ProcessLookupError:
+            return
+        except Exception:
+            try:
+                process.terminate()
+                process.wait(timeout=timeout)
+            except Exception:
+                pass
 
     def _publish_processing_status(
         self,
@@ -2694,7 +3518,8 @@ class ManagedAgentRuntime:
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
                 space_id=self.space_id,
-                tool_action=str(event.get("tool_action") or event.get("tool_action_name") or event.get("command") or "") or None,
+                tool_action=str(event.get("tool_action") or event.get("tool_action_name") or event.get("command") or "")
+                or None,
                 resource_uri=str(event.get("resource_uri") or "ui://gateway/tool-call"),
                 arguments_hash=_hash_tool_arguments(arguments),
                 kind=str(event.get("kind_name") or event.get("result_kind") or "gateway_runtime"),
@@ -2802,7 +3627,9 @@ class ManagedAgentRuntime:
             status = str(event.get("status") or "success").strip()
             metadata = self._processing_status_metadata(event)
             self._record_tool_call(message_id=message_id, event=event)
-            step_status = "tool_complete" if status.lower() in {"success", "completed", "ok", "tool_complete"} else "error"
+            step_status = (
+                "tool_complete" if status.lower() in {"success", "completed", "ok", "tool_complete"} else "error"
+            )
             self._update_state(
                 current_status=None if step_status == "tool_complete" else step_status,
                 current_activity=None,
@@ -2841,12 +3668,261 @@ class ManagedAgentRuntime:
                 activity_message=activity or None,
             )
 
-    def _handle_prompt(self, prompt: str, *, message_id: str) -> str:
+    def _sentinel_session_id(self, session_key: str) -> str | None:
+        with self._state_lock:
+            return self._sentinel_sessions.get(session_key)
+
+    def _remember_sentinel_session(self, session_key: str, session_id: str | None) -> None:
+        if not session_id:
+            return
+        with self._state_lock:
+            self._sentinel_sessions[session_key] = session_id
+
+    def _build_sentinel_cmd(self, runtime_name: str, session_id: str | None) -> list[str]:
+        command_override = str(self.entry.get("sentinel_command") or "").strip()
+        if command_override:
+            command = shlex.split(command_override)
+            if session_id:
+                command.extend(["--resume", session_id])
+            return command
+        if runtime_name == "codex":
+            return _build_sentinel_codex_cmd(self.entry, session_id)
+        return _build_sentinel_claude_cmd(self.entry, session_id)
+
+    def _handle_sentinel_cli_prompt(self, prompt: str, *, message_id: str, data: dict[str, Any] | None = None) -> str:
+        runtime_name = _sentinel_runtime_name(self.entry)
+        session_key = _sentinel_session_key(self.entry, data, message_id)
+        existing_session = self._sentinel_session_id(session_key)
+        cmd = self._build_sentinel_cmd(runtime_name, existing_session)
+        env = sanitize_exec_env(prompt, self.entry)
+        if message_id:
+            env["AX_GATEWAY_MESSAGE_ID"] = message_id
+        if self.space_id:
+            env["AX_GATEWAY_SPACE_ID"] = self.space_id
+        env["AX_GATEWAY_SENTINEL_SESSION_KEY"] = session_key
+
+        start_activity = (
+            f"Resuming {runtime_name} sentinel session"
+            if existing_session
+            else f"Starting {runtime_name} sentinel session"
+        )
+        self._publish_processing_status(message_id, "thinking", activity=start_activity)
+        self._update_state(current_status="thinking", current_activity=start_activity[:240])
+        record_gateway_activity(
+            "runtime_status",
+            entry=self.entry,
+            message_id=message_id,
+            status="thinking",
+            activity_message=start_activity,
+        )
+
+        try:
+            process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                cwd=self.entry.get("workdir") or None,
+                env=env,
+            )
+        except FileNotFoundError:
+            return f"(handler not found: {cmd[0]})"
+
+        if process.stdin is not None:
+            try:
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except Exception:
+                pass
+
+        accumulated_text = ""
+        stderr_lines: list[str] = []
+        new_session_id: str | None = None
+        last_activity_time = time.time()
+        exit_reason = "done"
+        timeout_seconds = int(
+            self.entry.get("timeout_seconds") or self.entry.get("timeout") or DEFAULT_HANDLER_TIMEOUT_SECONDS
+        )
+        finished = threading.Event()
+
+        def _consume_stderr() -> None:
+            if process.stderr is None:
+                return
+            for raw in process.stderr:
+                stderr_lines.append(raw)
+
+        def _timeout_watchdog() -> None:
+            nonlocal exit_reason
+            while not finished.wait(timeout=5.0):
+                if time.time() - last_activity_time <= timeout_seconds:
+                    continue
+                exit_reason = "timeout"
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                return
+
+        stderr_thread = threading.Thread(target=_consume_stderr, daemon=True, name=f"gw-sentinel-stderr-{self.name}")
+        watchdog_thread = threading.Thread(
+            target=_timeout_watchdog, daemon=True, name=f"gw-sentinel-watchdog-{self.name}"
+        )
+        stderr_thread.start()
+        watchdog_thread.start()
+
+        try:
+            if process.stdout is not None:
+                for raw in process.stdout:
+                    line = raw.strip()
+                    if not line:
+                        continue
+                    last_activity_time = time.time()
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+
+                    event_type = str(event.get("type") or "")
+                    if runtime_name == "codex":
+                        if event_type == "thread.started":
+                            new_session_id = str(event.get("thread_id") or "") or new_session_id
+                        elif event_type == "item.started":
+                            item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                            if str(item.get("type") or "") != "agent_message":
+                                self._handle_sentinel_tool_item(item, message_id=message_id, phase="start")
+                        elif event_type == "item.completed":
+                            item = event.get("item") if isinstance(event.get("item"), dict) else {}
+                            item_type = str(item.get("type") or "")
+                            if item_type == "agent_message":
+                                text = str(item.get("text") or "").strip()
+                                if text:
+                                    accumulated_text = text
+                            else:
+                                self._handle_sentinel_tool_item(item, message_id=message_id, phase="result")
+                        continue
+
+                    if event_type == "assistant":
+                        for block in event.get("message", {}).get("content", []):
+                            if not isinstance(block, dict):
+                                continue
+                            block_type = str(block.get("type") or "")
+                            if block_type == "text":
+                                accumulated_text = str(block.get("text") or accumulated_text)
+                            elif block_type == "tool_use":
+                                self._handle_claude_tool_use(block, message_id=message_id)
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta") if isinstance(event.get("delta"), dict) else {}
+                        if delta.get("type") == "text_delta":
+                            accumulated_text += str(delta.get("text") or "")
+                    elif event_type == "result":
+                        result_text = str(event.get("result") or "").strip()
+                        if result_text:
+                            accumulated_text = result_text
+                        new_session_id = str(event.get("session_id") or "") or new_session_id
+        except Exception as exc:
+            exit_reason = "crashed"
+            record_gateway_activity(
+                "runtime_error",
+                entry=self.entry,
+                message_id=message_id or None,
+                error=f"sentinel stream error: {str(exc)[:360]}",
+            )
+        finally:
+            finished.set()
+
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        stderr_thread.join(timeout=1.0)
+
+        if process.returncode != 0 and exit_reason == "done":
+            exit_reason = "crashed"
+        self._remember_sentinel_session(session_key, new_session_id)
+        if new_session_id:
+            record_gateway_activity(
+                "runtime_session_saved",
+                entry=self.entry,
+                message_id=message_id,
+                session_key=session_key,
+                session_id=new_session_id[:24],
+            )
+
+        final = accumulated_text.strip()
+        stderr = "".join(stderr_lines).strip()
+        if exit_reason == "timeout":
+            return final or f"Timed out after {timeout_seconds}s with no output."
+        if exit_reason == "crashed":
+            if final:
+                return final
+            if stderr:
+                return f"Hit an error processing that.\n\n(stderr: {stderr[:400]})"
+            return "Hit an error processing that."
+        return final or "Completed with no text output."
+
+    def _handle_sentinel_tool_item(self, item: dict[str, Any], *, message_id: str, phase: str) -> None:
+        item_type = str(item.get("type") or "tool").strip() or "tool"
+        tool_call_id = str(item.get("id") or item.get("call_id") or uuid.uuid4())
+        if item_type == "command_execution":
+            command = str(item.get("command") or "").strip()
+            arguments = {"command": command} if command else None
+            initial_data: dict[str, Any] = {}
+            if item.get("aggregated_output"):
+                initial_data["output"] = str(item.get("aggregated_output"))[:4000]
+            if item.get("exit_code") is not None:
+                initial_data["exit_code"] = item.get("exit_code")
+            event = {
+                "kind": "tool_start" if phase == "start" else "tool_result",
+                "tool_name": "shell",
+                "tool_action": command or "command_execution",
+                "tool_call_id": tool_call_id,
+                "arguments": arguments,
+                "initial_data": initial_data or None,
+                "message": _summarize_sentinel_command(command) if command else "Running command...",
+                "status": "tool_call"
+                if phase == "start"
+                else ("tool_complete" if int(item.get("exit_code") or 0) == 0 else "error"),
+            }
+        else:
+            event = {
+                "kind": "tool_start" if phase == "start" else "tool_result",
+                "tool_name": item_type,
+                "tool_action": str(item.get("title") or item_type),
+                "tool_call_id": tool_call_id,
+                "initial_data": {"item": item},
+                "message": f"Using {item_type}",
+                "status": "tool_call" if phase == "start" else "tool_complete",
+            }
+        self._handle_exec_event(event, message_id=message_id)
+
+    def _handle_claude_tool_use(self, block: dict[str, Any], *, message_id: str) -> None:
+        tool_name = str(block.get("name") or "tool").strip()
+        tool_input = block.get("input") if isinstance(block.get("input"), dict) else {}
+        tool_call_id = str(block.get("id") or uuid.uuid4())
+        event = {
+            "kind": "tool_start",
+            "tool_name": tool_name,
+            "tool_action": str(tool_input.get("command") or tool_name),
+            "tool_call_id": tool_call_id,
+            "arguments": tool_input,
+            "message": _sentinel_tool_summary(tool_name, tool_input),
+            "status": "tool_call",
+        }
+        self._handle_exec_event(event, message_id=message_id)
+
+    def _handle_prompt(self, prompt: str, *, message_id: str, data: dict[str, Any] | None = None) -> str:
         runtime_type = str(self.entry.get("runtime_type") or "echo").lower()
         if runtime_type == "echo":
             return _echo_handler(prompt, self.entry)
         if runtime_type in {"inbox", "passive", "monitor"}:
             return ""
+        if _is_sentinel_cli_runtime(runtime_type):
+            return self._handle_sentinel_cli_prompt(prompt, message_id=message_id, data=data)
         if runtime_type in {"exec", "command"}:
             command = str(self.entry.get("exec_command") or "").strip()
             if not command:
@@ -2904,7 +3980,9 @@ class ManagedAgentRuntime:
                     start_activity = "Composing echo reply"
                 elif runtime_type in {"exec", "command"}:
                     start_activity = "Preparing runtime"
-                if runtime_type in {"echo", "exec", "command"}:
+                elif _is_sentinel_cli_runtime(runtime_type):
+                    start_activity = "Preparing sentinel runtime"
+                if runtime_type in {"echo", "exec", "command"} or _is_sentinel_cli_runtime(runtime_type):
                     self._update_state(current_status=start_status, current_activity=start_activity[:240])
                     self._publish_processing_status(message_id, start_status, activity=start_activity)
                     record_gateway_activity(
@@ -2915,7 +3993,7 @@ class ManagedAgentRuntime:
                         activity_message=start_activity,
                     )
             try:
-                response_text = self._handle_prompt(prompt, message_id=message_id)
+                response_text = self._handle_prompt(prompt, message_id=message_id, data=data)
                 if response_text and self._send_client:
                     result = self._send_client.send_message(
                         self.space_id,
@@ -2939,7 +4017,9 @@ class ManagedAgentRuntime:
                         reply_preview=preview or None,
                     )
                 runtime_type = str(self.entry.get("runtime_type") or "echo").lower()
-                bridge_already_closed = runtime_type in {"exec", "command"} and self._consume_completed_seen(message_id)
+                bridge_already_closed = (
+                    runtime_type in {"exec", "command"} or _is_sentinel_cli_runtime(runtime_type)
+                ) and self._consume_completed_seen(message_id)
                 if message_id and not bridge_already_closed:
                     self._publish_processing_status(message_id, "completed")
                 self._bump("processed_count")
@@ -3038,19 +4118,16 @@ class ManagedAgentRuntime:
                             last_received_message_id=message_id,
                         )
                         record_gateway_activity("message_received", entry=self.entry, message_id=message_id)
+                        runtime_type = str(self.entry.get("runtime_type") or "").lower()
                         try:
-                            self._queue.put_nowait(data)
-                            backlog_depth = self._queue.qsize()
-                            runtime_type = str(self.entry.get("runtime_type") or "").lower()
+                            if _is_passive_runtime(runtime_type):
+                                pending_items = append_agent_pending_message(self.name, data)
+                                backlog_depth = len(pending_items)
+                            else:
+                                self._queue.put_nowait(data)
+                                backlog_depth = self._queue.qsize()
                             pickup_status = "queued" if _is_passive_runtime(runtime_type) else "started"
-                            accepted_activity = "Queued in Gateway"
-                            if not _is_passive_runtime(runtime_type):
-                                accepted_activity = "Picked up by Gateway"
-                            if backlog_depth > 1:
-                                if _is_passive_runtime(runtime_type):
-                                    accepted_activity = f"Queued in Gateway ({backlog_depth} pending)"
-                                else:
-                                    accepted_activity = f"Picked up by Gateway ({backlog_depth} pending)"
+                            accepted_activity = _gateway_pickup_activity(runtime_type, backlog_depth)
                             self._update_state(
                                 backlog_depth=backlog_depth,
                                 current_status=pickup_status,
@@ -3095,6 +4172,20 @@ class ManagedAgentRuntime:
                                 error="queue full",
                             )
                             self._log("queue full; dropped message")
+                        except Exception as exc:
+                            self._update_state(last_error=str(exc)[:400])
+                            self._publish_processing_status(
+                                message_id,
+                                "error",
+                                error_message=str(exc)[:400],
+                            )
+                            record_gateway_activity(
+                                "message_queue_error",
+                                entry=self.entry,
+                                message_id=message_id,
+                                error=str(exc)[:400],
+                            )
+                            self._log(f"queue error: {exc}")
             except Exception as exc:
                 if self.stop_event.is_set():
                     break
@@ -3109,7 +4200,9 @@ class ManagedAgentRuntime:
                     last_listener_error_at=_now_iso(),
                     reconnect_backoff_seconds=int(backoff),
                 )
-                record_gateway_activity(event_name, entry=self.entry, error=error_text, reconnect_in_seconds=int(backoff))
+                record_gateway_activity(
+                    event_name, entry=self.entry, error=error_text, reconnect_in_seconds=int(backoff)
+                )
                 self._log(f"listener error: {error_text}")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 30.0)
@@ -3156,10 +4249,14 @@ class GatewayDaemon:
     def _reconcile_runtime(self, entry: dict[str, Any]) -> None:
         name = str(entry.get("name") or "")
         desired_state = str(entry.get("desired_state") or "stopped").lower()
-        attestation_state = _normalized_optional_controlled(entry.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES)
+        attestation_state = _normalized_optional_controlled(
+            entry.get("attestation_state"), _CONTROLLED_ATTESTATION_STATES
+        )
         approval_state = _normalized_optional_controlled(entry.get("approval_state"), _CONTROLLED_APPROVAL_STATES)
         identity_status = _normalized_optional_controlled(entry.get("identity_status"), _CONTROLLED_IDENTITY_STATUSES)
-        environment_status = _normalized_optional_controlled(entry.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES)
+        environment_status = _normalized_optional_controlled(
+            entry.get("environment_status"), _CONTROLLED_ENVIRONMENT_STATUSES
+        )
         space_status = _normalized_optional_controlled(entry.get("space_status"), _CONTROLLED_SPACE_STATUSES)
         runtime = self._runtimes.get(name)
         hermes_status = hermes_setup_status(entry)
@@ -3171,7 +4268,9 @@ class GatewayDaemon:
                 {
                     "effective_state": "error",
                     "runtime_instance_id": None,
-                    "last_error": str(hermes_status.get("detail") or hermes_status.get("summary") or "Hermes setup is incomplete."),
+                    "last_error": str(
+                        hermes_status.get("detail") or hermes_status.get("summary") or "Hermes setup is incomplete."
+                    ),
                     "current_status": None,
                     "current_activity": str(hermes_status.get("summary") or "Hermes setup is incomplete."),
                     "current_tool": None,
@@ -3221,7 +4320,9 @@ class GatewayDaemon:
                 entry["install_id"] = str(uuid.uuid4())
 
             asset_id = _asset_id_for_entry(entry)
-            existing_binding = find_binding(registry, install_id=str(entry.get("install_id") or "").strip()) if asset_id else None
+            existing_binding = (
+                find_binding(registry, install_id=str(entry.get("install_id") or "").strip()) if asset_id else None
+            )
             if not existing_binding and asset_id and not _bindings_for_asset(registry, asset_id):
                 ensure_local_asset_binding(
                     registry,
@@ -3331,6 +4432,15 @@ class GatewayDaemon:
         registry.setdefault("gateway", {})
         registry["gateway"]["last_started_at"] = registry["gateway"].get("last_started_at") or _now_iso()
         record_gateway_activity("gateway_started", pid=os.getpid())
+        previous_handlers: dict[signal.Signals, Any] = {}
+
+        def _request_stop(_signum: int, _frame: Any) -> None:
+            self.stop()
+
+        if threading.current_thread() is threading.main_thread():
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                previous_handlers[sig] = signal.getsignal(sig)
+                signal.signal(sig, _request_stop)
         try:
             while not self._stop.is_set():
                 registry = load_gateway_registry()
@@ -3340,8 +4450,15 @@ class GatewayDaemon:
                     break
                 time.sleep(self.poll_interval)
         finally:
-            for runtime in list(self._runtimes.values()):
-                runtime.stop()
+            for sig, handler in previous_handlers.items():
+                signal.signal(sig, handler)
+            runtimes = list(self._runtimes.values())
+            for runtime in runtimes:
+                if _is_hermes_sentinel_runtime(runtime.entry.get("runtime_type")):
+                    runtime.stop(timeout=2.0)
+            for runtime in runtimes:
+                if not _is_hermes_sentinel_runtime(runtime.entry.get("runtime_type")):
+                    runtime.stop(timeout=1.0)
             final_registry = load_gateway_registry()
             final_gateway = final_registry.setdefault("gateway", {})
             final_gateway.update(

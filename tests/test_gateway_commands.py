@@ -898,6 +898,183 @@ print("done", flush=True)
     assert "tool_finished" in events
 
 
+def test_managed_sentinel_cli_runtime_resumes_agent_session(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    popen_calls = []
+
+    class _FakePipe:
+        def __init__(self, lines=None):
+            self.lines = list(lines or [])
+            self.writes = []
+
+        def __iter__(self):
+            return iter(self.lines)
+
+        def write(self, text):
+            self.writes.append(text)
+
+        def read(self):
+            return ""
+
+        def close(self):
+            return None
+
+    class _FakeProcess:
+        def __init__(self, cmd, **kwargs):
+            popen_calls.append(cmd)
+            self.stdin = _FakePipe()
+            self.stderr = _FakePipe()
+            self.returncode = 0
+            if len(popen_calls) == 1:
+                self.stdout = _FakePipe(
+                    [
+                        json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+                        json.dumps(
+                            {
+                                "type": "item.started",
+                                "item": {"type": "command_execution", "id": "tool-1", "command": "pwd"},
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "item.completed",
+                                "item": {
+                                    "type": "command_execution",
+                                    "id": "tool-1",
+                                    "command": "pwd",
+                                    "exit_code": 0,
+                                    "aggregated_output": "/tmp",
+                                },
+                            }
+                        ),
+                        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "remembered"}}),
+                    ]
+                )
+            else:
+                self.stdout = _FakePipe(
+                    [
+                        json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+                        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "cobalt"}}),
+                    ]
+                )
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(gateway_core.subprocess, "Popen", lambda cmd, **kwargs: _FakeProcess(cmd, **kwargs))
+    shared = _SharedRuntimeClient({})
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "dev_sentinel",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "sentinel_cli",
+            "sentinel_runtime": "codex",
+            "workdir": str(tmp_path),
+            "token_file": str(token_file),
+        },
+        client_factory=lambda **kwargs: shared,
+    )
+    runtime._send_client = shared
+
+    first = runtime._handle_prompt("remember cobalt", message_id="msg-1", data={"id": "msg-1"})
+    second = runtime._handle_prompt("what word?", message_id="msg-2", data={"id": "msg-2"})
+
+    assert first == "remembered"
+    assert second == "cobalt"
+    assert "resume" not in popen_calls[0]
+    assert "resume" in popen_calls[1]
+    assert "thread-1" in popen_calls[1]
+    assert [row["status"] for row in shared.processing] == [
+        "thinking",
+        "tool_call",
+        "tool_complete",
+        "thinking",
+    ]
+    assert shared.tool_calls[0]["tool_name"] == "shell"
+    assert shared.tool_calls[0]["message_id"] == "msg-1"
+
+
+def test_managed_hermes_sentinel_runtime_supervises_long_running_listener(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    workdir = tmp_path / "agents" / "dev_sentinel"
+    workdir.mkdir(parents=True)
+    script = tmp_path / "agents" / "claude_agent_v2.py"
+    observed = tmp_path / "observed.json"
+    monkeypatch.setenv("TEST_HERMES_SENTINEL_OBSERVED", str(observed))
+    script.write_text(
+        """
+import json
+import os
+import time
+
+path = os.environ["TEST_HERMES_SENTINEL_OBSERVED"]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "AX_TOKEN": os.environ.get("AX_TOKEN"),
+            "AX_BASE_URL": os.environ.get("AX_BASE_URL"),
+            "AX_AGENT_NAME": os.environ.get("AX_AGENT_NAME"),
+            "AX_AGENT_ID": os.environ.get("AX_AGENT_ID"),
+            "AX_SPACE_ID": os.environ.get("AX_SPACE_ID"),
+            "AX_CONFIG_DIR": os.environ.get("AX_CONFIG_DIR"),
+        },
+        handle,
+    )
+while True:
+    time.sleep(1)
+""".strip()
+    )
+    hermes_repo = tmp_path / "hermes-agent"
+    hermes_repo.mkdir()
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "dev_sentinel",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://dev.paxai.app",
+            "runtime_type": "hermes_sentinel",
+            "template_id": "hermes",
+            "workdir": str(workdir),
+            "token_file": str(token_file),
+            "hermes_repo_path": str(hermes_repo),
+            "hermes_python": sys.executable,
+            "log_path": str(tmp_path / "hermes.log"),
+        }
+    )
+
+    runtime.start()
+    deadline = time.time() + 3.0
+    while time.time() < deadline and not observed.exists():
+        time.sleep(0.05)
+    snapshot = runtime.snapshot()
+    runtime.stop()
+
+    assert observed.exists()
+    env = json.loads(observed.read_text())
+    assert env["AX_TOKEN"] == "axp_a_agent.secret"
+    assert env["AX_BASE_URL"] == "https://dev.paxai.app"
+    assert env["AX_AGENT_NAME"] == "dev_sentinel"
+    assert env["AX_AGENT_ID"] == "agent-1"
+    assert env["AX_SPACE_ID"] == "space-1"
+    assert env["AX_CONFIG_DIR"] == str(workdir / ".ax")
+    assert snapshot["effective_state"] == "running"
+    assert snapshot["current_activity"] == "Hermes sentinel listener running"
+
+
 def test_managed_inbox_runtime_queues_message_without_reply(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -937,10 +1114,71 @@ def test_managed_inbox_runtime_queues_message_without_reply(tmp_path, monkeypatc
     assert [row["status"] for row in shared.processing] == ["queued"]
     assert shared.processing[0]["activity"] == "Queued in Gateway"
     assert shared.processing[0]["detail"] == {"backlog_depth": 1, "pickup_state": "queued"}
+    pending = gateway_core.load_agent_pending_messages("inbox-bot")
+    assert pending == [
+        {
+            "message_id": "msg-1",
+            "parent_id": None,
+            "conversation_id": None,
+            "content": "@inbox-bot hello there",
+            "display_name": None,
+            "created_at": pending[0]["created_at"],
+            "queued_at": pending[0]["queued_at"],
+        }
+    ]
     recent = gateway_core.load_recent_gateway_activity()
     events = [row["event"] for row in recent]
     assert "message_received" in events
     assert "message_queued" in events
+
+
+def test_passive_runtime_snapshot_rehydrates_manual_queue_updates(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    token_file = tmp_path / "token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "inbox-bot",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "inbox",
+            "token_file": str(token_file),
+            "backlog_depth": 0,
+            "current_status": None,
+            "current_activity": None,
+            "processed_count": 1,
+            "last_reply_message_id": "reply-1",
+            "last_reply_preview": "handled",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+    gateway_core.save_agent_pending_messages("inbox-bot", [])
+
+    runtime = gateway_core.ManagedAgentRuntime(
+        {
+            "name": "inbox-bot",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "inbox",
+            "token_file": str(token_file),
+        },
+        client_factory=lambda **kwargs: _SharedRuntimeClient({}),
+    )
+    runtime._update_state(backlog_depth=1, current_status="queued", current_activity="Queued in Gateway")
+
+    snapshot = runtime.snapshot()
+
+    assert snapshot["backlog_depth"] == 0
+    assert snapshot["current_status"] is None
+    assert snapshot["current_activity"] is None
+    assert snapshot["processed_count"] == 1
+    assert snapshot["last_reply_message_id"] == "reply-1"
+    assert snapshot["last_reply_preview"] == "handled"
 
 
 def test_annotate_runtime_health_marks_stale_after_missed_heartbeat():
@@ -1438,9 +1676,9 @@ def test_gateway_templates_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["templates"]]
-    assert ids[:4] == ["echo_test", "ollama", "hermes", "claude_code_channel"]
+    assert ids[:5] == ["echo_test", "ollama", "hermes", "sentinel_cli", "claude_code_channel"]
     assert "inbox" not in ids
-    assert payload["count"] == 4
+    assert payload["count"] == 5
     ollama = next(item for item in payload["templates"] if item["id"] == "ollama")
     assert ollama["runtime_type"] == "exec"
     assert ollama["launchable"] is True
@@ -1479,10 +1717,14 @@ def test_gateway_runtime_types_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["runtime_types"]]
-    assert ids == ["echo", "exec", "inbox"]
+    assert ids == ["echo", "exec", "hermes_sentinel", "sentinel_cli", "inbox"]
     exec_type = next(item for item in payload["runtime_types"] if item["id"] == "exec")
     assert exec_type["signals"]["activity"]
     assert exec_type["examples"]
+    hermes_type = next(item for item in payload["runtime_types"] if item["id"] == "hermes_sentinel")
+    assert hermes_type["kind"] == "supervised_process"
+    sentinel_type = next(item for item in payload["runtime_types"] if item["id"] == "sentinel_cli")
+    assert sentinel_type["signals"]["tools"]
 
 
 def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path):
@@ -1549,15 +1791,15 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             runtime_types = client.get("/api/runtime-types")
             assert runtime_types.status_code == 200
             runtime_payload = runtime_types.json()
-            assert runtime_payload["count"] == 3
+            assert runtime_payload["count"] == 5
             assert runtime_payload["runtime_types"][1]["id"] == "exec"
 
             templates = client.get("/api/templates")
             assert templates.status_code == 200
             template_payload = templates.json()
             assert template_payload["templates"][0]["id"] == "echo_test"
-            assert template_payload["templates"][3]["launchable"] is False
-            assert template_payload["count"] == 4
+            assert template_payload["templates"][4]["launchable"] is False
+            assert template_payload["count"] == 5
 
             detail = client.get("/api/agents/echo-bot")
             assert detail.status_code == 200
@@ -1726,6 +1968,13 @@ def test_gateway_agents_update_changes_template_and_workdir(monkeypatch, tmp_pat
     stored = gateway_core.load_gateway_registry()["agents"][0]
     assert stored["template_id"] == "ollama"
     assert stored["workdir"] == str(tmp_path)
+    registry_after = gateway_core.load_gateway_registry()
+    binding = registry_after["bindings"][0]
+    assert binding["launch_spec"]["runtime_type"] == "exec"
+    assert binding["launch_spec"]["workdir"] == str(tmp_path)
+    assert binding["path"] == str(tmp_path)
+    attestation = gateway_core.evaluate_runtime_attestation(registry_after, stored)
+    assert attestation["attestation_state"] == "verified"
 
 
 def test_gateway_agents_add_ollama_persists_model_override(monkeypatch, tmp_path):
@@ -1905,6 +2154,84 @@ def test_gateway_agents_send_uses_managed_identity(monkeypatch, tmp_path):
     assert payload["message"]["metadata"]["gateway"]["sent_via"] == "gateway_cli"
     recent = gateway_core.load_recent_gateway_activity()
     assert recent[-1]["event"] == "manual_message_sent"
+
+
+def test_gateway_agents_send_acknowledges_pending_inbox_message(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "codex",
+        }
+    )
+    token_file = tmp_path / "sender.token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "sender-bot",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "inbox",
+            "desired_state": "running",
+            "effective_state": "running",
+            "token_file": str(token_file),
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "backlog_depth": 1,
+            "current_status": "queued",
+            "current_activity": "Queued in Gateway",
+            "last_received_message_id": "msg-queued-1",
+            "last_work_received_at": "2026-04-23T18:00:00+00:00",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+    gateway_core.save_agent_pending_messages(
+        "sender-bot",
+        [
+            {
+                "message_id": "msg-queued-1",
+                "parent_id": None,
+                "conversation_id": "msg-queued-1",
+                "content": "@sender-bot hello there",
+                "display_name": "madtank",
+                "created_at": "2026-04-23T18:00:00+00:00",
+                "queued_at": "2026-04-23T18:00:01+00:00",
+            }
+        ],
+    )
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+
+    result = runner.invoke(
+        app,
+        [
+            "gateway",
+            "agents",
+            "send",
+            "sender-bot",
+            "handled",
+            "--parent-id",
+            "msg-queued-1",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["message"]["parent_id"] == "msg-queued-1"
+    assert gateway_core.load_agent_pending_messages("sender-bot") == []
+    updated = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "sender-bot")
+    assert updated["backlog_depth"] == 0
+    assert updated["current_status"] is None
+    assert updated["current_activity"] is None
+    assert updated["processed_count"] == 1
+    assert updated["last_reply_message_id"] == "msg-sent-1"
+    recent = gateway_core.load_recent_gateway_activity()
+    assert recent[-1]["event"] == "manual_queue_acknowledged"
 
 
 def test_gateway_agents_send_blocks_identity_mismatch(monkeypatch, tmp_path):

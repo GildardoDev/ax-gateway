@@ -52,6 +52,7 @@ from ..gateway import (
     deny_gateway_approval,
     ensure_gateway_identity_binding,
     ensure_local_asset_binding,
+    evaluate_runtime_attestation,
     find_agent_entry,
     gateway_dir,
     get_gateway_approval,
@@ -191,7 +192,7 @@ def _normalize_runtime_type(runtime_type: str) -> str:
     try:
         return str(runtime_type_definition(runtime_type)["id"])
     except KeyError as exc:
-        raise ValueError("Unsupported runtime type. Use echo, exec, or inbox.") from exc
+        raise ValueError("Unsupported runtime type. Use echo, exec, hermes_sentinel, sentinel_cli, or inbox.") from exc
 
 
 def _validate_runtime_registration(runtime_type: str, exec_cmd: str | None) -> None:
@@ -200,7 +201,7 @@ def _validate_runtime_registration(runtime_type: str, exec_cmd: str | None) -> N
     if "exec_command" in required and not exec_cmd:
         raise ValueError("Exec runtimes require --exec.")
     if "exec_command" not in required and exec_cmd:
-        raise ValueError("Echo and inbox runtimes do not accept --exec.")
+        raise ValueError("This runtime does not accept --exec.")
 
 
 def _register_managed_agent(
@@ -304,10 +305,13 @@ def _register_managed_agent(
     )
     ensure_local_asset_binding(registry, entry, created_via="cli", auto_approve=True)
     ensure_gateway_identity_binding(registry, entry, session=session, created_via="cli")
+    entry.update(evaluate_runtime_attestation(registry, entry))
     hermes_status = hermes_setup_status(entry)
     if not hermes_status.get("ready", True):
         entry["effective_state"] = "error"
-        entry["last_error"] = str(hermes_status.get("detail") or hermes_status.get("summary") or "Hermes setup is incomplete.")
+        entry["last_error"] = str(
+            hermes_status.get("detail") or hermes_status.get("summary") or "Hermes setup is incomplete."
+        )
         entry["current_activity"] = str(hermes_status.get("summary") or "Hermes setup is incomplete.")
     elif hermes_status.get("resolved_path"):
         entry["hermes_repo_path"] = str(hermes_status["resolved_path"])
@@ -351,7 +355,9 @@ def _update_managed_agent(
         if not bool(template.get("launchable", True)):
             raise ValueError(f"Template {template['label']} is not launchable yet.")
 
-    runtime_candidate = runtime_type or (template.get("defaults") or {}).get("runtime_type") if template else runtime_type
+    runtime_candidate = (
+        runtime_type or (template.get("defaults") or {}).get("runtime_type") if template else runtime_type
+    )
     runtime_effective = str(runtime_candidate or entry.get("runtime_type") or "echo")
     runtime_effective = _normalize_runtime_type(runtime_effective)
     template_effective_id = str(template.get("id") if template else entry.get("template_id") or "").strip().lower()
@@ -375,9 +381,7 @@ def _update_managed_agent(
             else (str(exec_cmd).strip() or None)
         )
         workdir_effective = (
-            str(entry.get("workdir") or "").strip() or None
-            if workdir is _UNSET
-            else (str(workdir).strip() or None)
+            str(entry.get("workdir") or "").strip() or None if workdir is _UNSET else (str(workdir).strip() or None)
         )
 
     if ollama_model is _UNSET:
@@ -420,10 +424,14 @@ def _update_managed_agent(
         entry.pop("hermes_repo_path", None)
 
     ensure_gateway_identity_binding(registry, entry, session=session)
+    ensure_local_asset_binding(registry, entry, created_via="cli", auto_approve=True, replace_existing=True)
+    entry.update(evaluate_runtime_attestation(registry, entry))
     hermes_status = hermes_setup_status(entry)
     if not hermes_status.get("ready", True):
         entry["effective_state"] = "error"
-        entry["last_error"] = str(hermes_status.get("detail") or hermes_status.get("summary") or "Hermes setup is incomplete.")
+        entry["last_error"] = str(
+            hermes_status.get("detail") or hermes_status.get("summary") or "Hermes setup is incomplete."
+        )
         entry["current_activity"] = str(hermes_status.get("summary") or "Hermes setup is incomplete.")
     elif hermes_status.get("resolved_path"):
         entry["hermes_repo_path"] = str(hermes_status["resolved_path"])
@@ -482,6 +490,54 @@ def _identity_space_send_guard(entry: dict, *, explicit_space_id: str | None = N
     return snapshot
 
 
+def _sync_passive_queue_after_manual_send(
+    *,
+    entry: dict,
+    handled_message_id: str | None,
+    reply_message_id: str | None,
+    reply_preview: str | None,
+) -> None:
+    runtime_type = str(entry.get("runtime_type") or "").lower()
+    if runtime_type not in {"inbox", "passive", "monitor"}:
+        return
+
+    pending_items = gateway_core.remove_agent_pending_message(str(entry.get("name") or ""), handled_message_id)
+    registry = load_gateway_registry()
+    stored = find_agent_entry(registry, str(entry.get("name") or "")) or entry
+    backlog_depth = len(pending_items)
+    last_pending = pending_items[-1] if pending_items else {}
+
+    if handled_message_id:
+        stored["processed_count"] = int(stored.get("processed_count") or 0) + 1
+        stored["last_work_completed_at"] = datetime.now(timezone.utc).isoformat()
+
+    stored["backlog_depth"] = backlog_depth
+    stored["current_status"] = "queued" if backlog_depth > 0 else None
+    stored["current_activity"] = (
+        gateway_core._gateway_pickup_activity(runtime_type, backlog_depth)[:240] if backlog_depth > 0 else None
+    )
+    stored["last_reply_message_id"] = reply_message_id or stored.get("last_reply_message_id")
+    stored["last_reply_preview"] = reply_preview or stored.get("last_reply_preview")
+    if last_pending:
+        stored["last_received_message_id"] = last_pending.get("message_id")
+        stored["last_work_received_at"] = (
+            last_pending.get("queued_at") or last_pending.get("created_at") or stored.get("last_work_received_at")
+        )
+    elif handled_message_id:
+        stored["last_received_message_id"] = None
+        stored["last_work_received_at"] = None
+
+    save_gateway_registry(registry)
+    if handled_message_id:
+        record_gateway_activity(
+            "manual_queue_acknowledged",
+            entry=stored,
+            message_id=handled_message_id,
+            reply_message_id=reply_message_id,
+            backlog_depth=backlog_depth,
+        )
+
+
 def _send_from_managed_agent(
     *,
     name: str,
@@ -536,6 +592,12 @@ def _send_from_managed_agent(
             "manual_message_sent",
             entry=entry,
             message_id=payload.get("id"),
+            reply_preview=message_content[:120] or None,
+        )
+        _sync_passive_queue_after_manual_send(
+            entry=entry,
+            handled_message_id=parent_id,
+            reply_message_id=str(payload.get("id") or "") or None,
             reply_preview=message_content[:120] or None,
         )
     return {"agent": entry.get("name"), "message": payload, "content": message_content}
@@ -650,10 +712,16 @@ def _gateway_alerts(payload: dict, *, limit: int = 6) -> list[dict]:
     if not payload.get("connected"):
         push("error", "Gateway is not logged in", "Run `ax gateway login` to bootstrap the local control plane.")
     elif not payload.get("daemon", {}).get("running"):
-        push("error", "Gateway daemon is stopped", "Start it with `uv run ax gateway start` or relaunch the local service.")
+        push(
+            "error",
+            "Gateway daemon is stopped",
+            "Start it with `uv run ax gateway start` or relaunch the local service.",
+        )
 
     if not payload.get("ui", {}).get("running"):
-        push("warning", "Gateway UI is stopped", "Start it with `uv run ax gateway start` to launch the local dashboard.")
+        push(
+            "warning", "Gateway UI is stopped", "Start it with `uv run ax gateway start` to launch the local dashboard."
+        )
 
     for agent in payload.get("agents", []):
         name = str(agent.get("name") or "")
@@ -677,7 +745,10 @@ def _gateway_alerts(payload: dict, *, limit: int = 6) -> list[dict]:
             detail = str(agent.get("confidence_detail") or "Runtime changed since approval and needs review.")
             push("warning", f"@{name} changed since approval", detail, agent_name=name)
         elif presence == "BLOCKED":
-            detail = str(agent.get("confidence_detail") or "Gateway blocked this runtime until identity, space, or approval state is fixed.")
+            detail = str(
+                agent.get("confidence_detail")
+                or "Gateway blocked this runtime until identity, space, or approval state is fixed."
+            )
             push("error", f"@{name} is blocked", detail, agent_name=name)
         elif presence == "ERROR":
             if setup_error_preview:
@@ -689,7 +760,10 @@ def _gateway_alerts(payload: dict, *, limit: int = 6) -> list[dict]:
             detail = f"No heartbeat for {_format_age(agent.get('last_seen_age_seconds'))}."
             push("warning", f"@{name} looks stale", detail, agent_name=name)
         elif presence == "OFFLINE" and str(agent.get("mode") or "") == "LIVE":
-            detail = str(agent.get("confidence_detail") or "Expected a live runtime, but Gateway does not currently have a working path.")
+            detail = str(
+                agent.get("confidence_detail")
+                or "Expected a live runtime, but Gateway does not currently have a working path."
+            )
             push("warning", f"@{name} is offline", detail, agent_name=name)
         if setup_error_preview and presence != "ERROR":
             push("error", f"@{name} has a runtime setup error", preview[:180], agent_name=name)
@@ -909,8 +983,16 @@ def _doctor_result_status(checks: list[dict]) -> str:
 
 
 def _doctor_summary(checks: list[dict], status: str) -> str:
-    failures = [str(item.get("detail") or item.get("name") or "").strip() for item in checks if str(item.get("status") or "").strip().lower() == "failed"]
-    warnings = [str(item.get("detail") or item.get("name") or "").strip() for item in checks if str(item.get("status") or "").strip().lower() == "warning"]
+    failures = [
+        str(item.get("detail") or item.get("name") or "").strip()
+        for item in checks
+        if str(item.get("status") or "").strip().lower() == "failed"
+    ]
+    warnings = [
+        str(item.get("detail") or item.get("name") or "").strip()
+        for item in checks
+        if str(item.get("status") or "").strip().lower() == "warning"
+    ]
     if status == "failed" and failures:
         return failures[0]
     if status == "warning" and warnings:
@@ -965,17 +1047,37 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
 
     identity_status = str(snapshot.get("identity_status") or "").lower()
     if identity_status == "verified":
-        add_check("identity_binding", "passed", f"Gateway is acting as {snapshot.get('acting_agent_name') or entry.get('name')}.")
+        add_check(
+            "identity_binding",
+            "passed",
+            f"Gateway is acting as {snapshot.get('acting_agent_name') or entry.get('name')}.",
+        )
     elif identity_status == "bootstrap_only":
-        add_check("identity_binding", "failed", "Gateway would need to use a bootstrap credential for an agent-authored action.")
+        add_check(
+            "identity_binding",
+            "failed",
+            "Gateway would need to use a bootstrap credential for an agent-authored action.",
+        )
     else:
-        add_check("identity_binding", "failed", str(snapshot.get("confidence_detail") or "Gateway does not have a valid acting identity binding."))
+        add_check(
+            "identity_binding",
+            "failed",
+            str(snapshot.get("confidence_detail") or "Gateway does not have a valid acting identity binding."),
+        )
 
     environment_status = str(snapshot.get("environment_status") or "").lower()
     if environment_status == "environment_allowed":
-        add_check("environment_binding", "passed", f"Requested environment matches {snapshot.get('environment_label') or snapshot.get('base_url') or entry.get('base_url')}.")
+        add_check(
+            "environment_binding",
+            "passed",
+            f"Requested environment matches {snapshot.get('environment_label') or snapshot.get('base_url') or entry.get('base_url')}.",
+        )
     elif environment_status == "environment_mismatch":
-        add_check("environment_binding", "failed", str(snapshot.get("confidence_detail") or "Requested environment does not match the bound environment."))
+        add_check(
+            "environment_binding",
+            "failed",
+            str(snapshot.get("confidence_detail") or "Requested environment does not match the bound environment."),
+        )
     else:
         add_check("environment_binding", "warning", "Gateway could not fully verify the bound environment.")
 
@@ -987,22 +1089,42 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
 
     space_status = str(snapshot.get("space_status") or "").lower()
     if space_status == "active_allowed":
-        add_check("space_binding", "passed", f"Active space is {snapshot.get('active_space_name') or snapshot.get('active_space_id')}.")
+        add_check(
+            "space_binding",
+            "passed",
+            f"Active space is {snapshot.get('active_space_name') or snapshot.get('active_space_id')}.",
+        )
     elif space_status == "no_active_space":
         add_check("space_binding", "failed", "Gateway does not have an active space selected for this asset.")
     elif space_status == "active_not_allowed":
-        add_check("space_binding", "failed", str(snapshot.get("confidence_detail") or "Active space is not allowed for this identity."))
+        add_check(
+            "space_binding",
+            "failed",
+            str(snapshot.get("confidence_detail") or "Active space is not allowed for this identity."),
+        )
     else:
         add_check("space_binding", "warning", "Gateway could not fully verify the active space.")
 
     attestation_state = str(snapshot.get("attestation_state") or "").lower()
     approval_state = str(snapshot.get("approval_state") or "").lower()
     if approval_state == "pending":
-        add_check("binding_approval", "warning", str(snapshot.get("confidence_detail") or "Gateway needs approval before trusting this runtime binding."))
+        add_check(
+            "binding_approval",
+            "warning",
+            str(snapshot.get("confidence_detail") or "Gateway needs approval before trusting this runtime binding."),
+        )
     elif approval_state == "rejected" or attestation_state == "blocked":
-        add_check("binding_approval", "failed", str(snapshot.get("confidence_detail") or "Gateway blocked this runtime binding."))
+        add_check(
+            "binding_approval",
+            "failed",
+            str(snapshot.get("confidence_detail") or "Gateway blocked this runtime binding."),
+        )
     elif attestation_state == "drifted":
-        add_check("binding_attestation", "failed", str(snapshot.get("confidence_detail") or "Runtime binding drifted from its approved launch spec."))
+        add_check(
+            "binding_attestation",
+            "failed",
+            str(snapshot.get("confidence_detail") or "Runtime binding drifted from its approved launch spec."),
+        )
     elif attestation_state == "verified":
         add_check("binding_attestation", "passed", "Runtime matches the approved local binding.")
 
@@ -1036,7 +1158,9 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
                 elif bool(snapshot.get("connected")):
                     add_check("session_attach", "passed", "Attached session is connected to Gateway.")
                 else:
-                    add_check("session_attach", "failed", "Gateway does not currently have an attached session to supervise.")
+                    add_check(
+                        "session_attach", "failed", "Gateway does not currently have an attached session to supervise."
+                    )
             elif runtime_type != "echo":
                 if exec_command:
                     add_check("runtime_launch", "passed", "Gateway has a launch command for this runtime.")
@@ -1046,11 +1170,21 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
             if runtime_type == "echo" or exec_command:
                 add_check("launch_ready", "passed", "Gateway can launch this runtime when work arrives.")
             else:
-                add_check("launch_ready", "failed", "Gateway does not have a launch command for this on-demand runtime.")
+                add_check(
+                    "launch_ready", "failed", "Gateway does not have a launch command for this on-demand runtime."
+                )
         elif intake_model == "scheduled_run":
-            add_check("schedule_ready", "warning", "Scheduled asset support is taxonomy-defined but not fully implemented in Gateway yet.")
+            add_check(
+                "schedule_ready",
+                "warning",
+                "Scheduled asset support is taxonomy-defined but not fully implemented in Gateway yet.",
+            )
         elif intake_model == "event_triggered":
-            add_check("event_source", "warning", "Alert-driven asset support is taxonomy-defined but not fully implemented in Gateway yet.")
+            add_check(
+                "event_source",
+                "warning",
+                "Alert-driven asset support is taxonomy-defined but not fully implemented in Gateway yet.",
+            )
         elif asset_class == "service_proxy":
             if exec_command:
                 add_check("runtime_launch", "passed", "Gateway has a launch command for this runtime.")
@@ -1079,7 +1213,9 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
         else:
             recommended_model = str(ollama_status.get("recommended_model") or "").strip()
             if recommended_model:
-                add_check("ollama_model", "passed", f"Gateway will use the recommended local model {recommended_model}.")
+                add_check(
+                    "ollama_model", "passed", f"Gateway will use the recommended local model {recommended_model}."
+                )
             else:
                 add_check("ollama_model", "warning", "No Ollama model is selected yet.")
         add_check("launch_path", "passed", "Gateway can launch the Ollama bridge on send.")
@@ -1257,7 +1393,12 @@ def _render_gateway_overview(payload: dict) -> Panel:
     grid.add_column(ratio=2)
     grid.add_column(style="bold")
     grid.add_column(ratio=2)
-    grid.add_row("Gateway", str(gateway.get("gateway_id") or "-")[:8], "Daemon", "running" if payload["daemon"]["running"] else "stopped")
+    grid.add_row(
+        "Gateway",
+        str(gateway.get("gateway_id") or "-")[:8],
+        "Daemon",
+        "running" if payload["daemon"]["running"] else "stopped",
+    )
     grid.add_row("User", str(payload.get("user") or "-"), "Base URL", str(payload.get("base_url") or "-"))
     space_label = str(payload.get("space_name") or payload.get("space_id") or "-")
     grid.add_row("Space", space_label, "PID", str(payload["daemon"].get("pid") or "-"))
@@ -1285,7 +1426,19 @@ def _render_agent_table(agents: list[dict]) -> Table:
     table.add_column("Seen", justify="right")
     table.add_column("Activity", overflow="fold")
     if not agents:
-        table.add_row("No managed agents", "-", Text("ON-DEMAND", style="dim"), Text("OFFLINE", style="dim"), Text("Reply", style="dim"), Text("MEDIUM", style="dim"), "-", "-", "0", "-", "-")
+        table.add_row(
+            "No managed agents",
+            "-",
+            Text("ON-DEMAND", style="dim"),
+            Text("OFFLINE", style="dim"),
+            Text("Reply", style="dim"),
+            Text("MEDIUM", style="dim"),
+            "-",
+            "-",
+            "0",
+            "-",
+            "-",
+        )
         return table
     for agent in _sorted_agents(agents):
         activity = str(
@@ -1300,7 +1453,10 @@ def _render_agent_table(agents: list[dict]) -> Table:
             _agent_type_label(agent),
             _mode_text(agent.get("mode")),
             _presence_text(agent.get("presence")),
-            Text(_agent_output_label(agent), style="green" if str(agent.get("output_label") or "").lower() == "reply" else "yellow"),
+            Text(
+                _agent_output_label(agent),
+                style="green" if str(agent.get("output_label") or "").lower() == "reply" else "yellow",
+            ),
             _confidence_text(agent.get("confidence")),
             str(agent.get("acting_agent_name") or agent.get("name") or "-"),
             str(agent.get("active_space_name") or agent.get("active_space_id") or agent.get("space_id") or "-"),
@@ -1384,7 +1540,9 @@ def _render_gateway_dashboard(payload: dict) -> Group:
         metrics,
         Panel(_render_alert_table(payload.get("alerts", [])), title="Alerts", border_style="red"),
         Panel(_render_agent_table(agents), title="Managed Agents", border_style="green"),
-        Panel(_render_activity_table(payload.get("recent_activity", [])), title="Recent Activity", border_style="magenta"),
+        Panel(
+            _render_activity_table(payload.get("recent_activity", [])), title="Recent Activity", border_style="magenta"
+        ),
     )
 
 
@@ -2992,27 +3150,93 @@ def _render_agent_detail(entry: dict, *, activity: list[dict]) -> Group:
     overview.add_row("Template", _agent_template_label(entry), "Output", _agent_output_label(entry))
     overview.add_row("Mode", str(entry.get("mode") or "-"), "Presence", str(entry.get("presence") or "-"))
     overview.add_row("Reply", str(entry.get("reply") or "-"), "Confidence", str(entry.get("confidence") or "-"))
-    overview.add_row("Asset Class", str(entry.get("asset_class") or "-"), "Intake", str(entry.get("intake_model") or "-"))
-    overview.add_row("Trigger", str((entry.get("trigger_sources") or [None])[0] or "-"), "Return", str((entry.get("return_paths") or [None])[0] or "-"))
-    overview.add_row("Telemetry", str(entry.get("telemetry_shape") or "-"), "Worker", str(entry.get("worker_model") or "-"))
-    overview.add_row("Attestation", str(entry.get("attestation_state") or "-"), "Approval", str(entry.get("approval_state") or "-"))
-    overview.add_row("Acting As", str(entry.get("acting_agent_name") or "-"), "Identity", str(entry.get("identity_status") or "-"))
-    overview.add_row("Environment", str(entry.get("environment_label") or entry.get("base_url") or "-"), "Env Status", str(entry.get("environment_status") or "-"))
-    overview.add_row("Current Space", str(entry.get("active_space_name") or entry.get("active_space_id") or "-"), "Space Status", str(entry.get("space_status") or "-"))
-    overview.add_row("Default Space", str(entry.get("default_space_name") or entry.get("default_space_id") or "-"), "Allowed Spaces", str(entry.get("allowed_space_count") or 0))
-    overview.add_row("Install", str(entry.get("install_id") or "-"), "Runtime Instance", str(entry.get("runtime_instance_id") or "-"))
+    overview.add_row(
+        "Asset Class", str(entry.get("asset_class") or "-"), "Intake", str(entry.get("intake_model") or "-")
+    )
+    overview.add_row(
+        "Trigger",
+        str((entry.get("trigger_sources") or [None])[0] or "-"),
+        "Return",
+        str((entry.get("return_paths") or [None])[0] or "-"),
+    )
+    overview.add_row(
+        "Telemetry", str(entry.get("telemetry_shape") or "-"), "Worker", str(entry.get("worker_model") or "-")
+    )
+    overview.add_row(
+        "Attestation", str(entry.get("attestation_state") or "-"), "Approval", str(entry.get("approval_state") or "-")
+    )
+    overview.add_row(
+        "Acting As", str(entry.get("acting_agent_name") or "-"), "Identity", str(entry.get("identity_status") or "-")
+    )
+    overview.add_row(
+        "Environment",
+        str(entry.get("environment_label") or entry.get("base_url") or "-"),
+        "Env Status",
+        str(entry.get("environment_status") or "-"),
+    )
+    overview.add_row(
+        "Current Space",
+        str(entry.get("active_space_name") or entry.get("active_space_id") or "-"),
+        "Space Status",
+        str(entry.get("space_status") or "-"),
+    )
+    overview.add_row(
+        "Default Space",
+        str(entry.get("default_space_name") or entry.get("default_space_id") or "-"),
+        "Allowed Spaces",
+        str(entry.get("allowed_space_count") or 0),
+    )
+    overview.add_row(
+        "Install", str(entry.get("install_id") or "-"), "Runtime Instance", str(entry.get("runtime_instance_id") or "-")
+    )
     overview.add_row("Reachability", _reachability_copy(entry), "Reason", str(entry.get("confidence_reason") or "-"))
-    overview.add_row("Desired", str(entry.get("desired_state") or "-"), "Effective", str(entry.get("effective_state") or "-"))
-    overview.add_row("Connected", "yes" if entry.get("connected") else "no", "Queue", str(entry.get("backlog_depth") or 0))
-    overview.add_row("Seen", _format_age(entry.get("last_seen_age_seconds")), "Reconnect", _format_age(entry.get("reconnect_backoff_seconds")))
-    overview.add_row("Processed", str(entry.get("processed_count") or 0), "Dropped", str(entry.get("dropped_count") or 0))
-    overview.add_row("Last Work", _format_timestamp(entry.get("last_work_received_at")), "Completed", _format_timestamp(entry.get("last_work_completed_at")))
-    overview.add_row("Phase", str(entry.get("current_status") or "-"), "Activity", str(entry.get("current_activity") or "-"))
+    overview.add_row(
+        "Desired", str(entry.get("desired_state") or "-"), "Effective", str(entry.get("effective_state") or "-")
+    )
+    overview.add_row(
+        "Connected", "yes" if entry.get("connected") else "no", "Queue", str(entry.get("backlog_depth") or 0)
+    )
+    overview.add_row(
+        "Seen",
+        _format_age(entry.get("last_seen_age_seconds")),
+        "Reconnect",
+        _format_age(entry.get("reconnect_backoff_seconds")),
+    )
+    overview.add_row(
+        "Processed", str(entry.get("processed_count") or 0), "Dropped", str(entry.get("dropped_count") or 0)
+    )
+    overview.add_row(
+        "Last Work",
+        _format_timestamp(entry.get("last_work_received_at")),
+        "Completed",
+        _format_timestamp(entry.get("last_work_completed_at")),
+    )
+    overview.add_row(
+        "Phase", str(entry.get("current_status") or "-"), "Activity", str(entry.get("current_activity") or "-")
+    )
     overview.add_row("Tool", str(entry.get("current_tool") or "-"), "Adapter", str(entry.get("runtime_type") or "-"))
-    overview.add_row("Cred Source", str(entry.get("credential_source") or "-"), "Space", str(entry.get("space_id") or "-"))
-    overview.add_row("Agent ID", str(entry.get("agent_id") or "-"), "Last Reply", str(entry.get("last_reply_preview") or "-"))
-    overview.add_row("Last Error", str(entry.get("last_error") or "-"), "Confidence Detail", str(entry.get("confidence_detail") or "-"))
-    overview.add_row("Doctor", str(entry.get("last_successful_doctor_at") or "-"), "Doctor Status", str((entry.get("last_doctor_result") or {}).get("status") if isinstance(entry.get("last_doctor_result"), dict) else "-"))
+    overview.add_row(
+        "Cred Source", str(entry.get("credential_source") or "-"), "Space", str(entry.get("space_id") or "-")
+    )
+    overview.add_row(
+        "Agent ID", str(entry.get("agent_id") or "-"), "Last Reply", str(entry.get("last_reply_preview") or "-")
+    )
+    overview.add_row(
+        "Last Error",
+        str(entry.get("last_error") or "-"),
+        "Confidence Detail",
+        str(entry.get("confidence_detail") or "-"),
+    )
+    overview.add_row(
+        "Doctor",
+        str(entry.get("last_successful_doctor_at") or "-"),
+        "Doctor Status",
+        str(
+            (entry.get("last_doctor_result") or {}).get("status")
+            if isinstance(entry.get("last_doctor_result"), dict)
+            else "-"
+        ),
+    )
 
     paths = Table.grid(expand=True, padding=(0, 2))
     paths.add_column(style="bold")
@@ -3031,8 +3255,12 @@ def _render_agent_detail(entry: dict, *, activity: list[dict]) -> Group:
 
 @app.command("login")
 def login(
-    token: str = typer.Option(None, "--token", "-t", help="User PAT (prompted or reused from axctl login when omitted)"),
-    base_url: str = typer.Option(None, "--url", "-u", help="API base URL (defaults to existing axctl login or paxai.app)"),
+    token: str = typer.Option(
+        None, "--token", "-t", help="User PAT (prompted or reused from axctl login when omitted)"
+    ),
+    base_url: str = typer.Option(
+        None, "--url", "-u", help="API base URL (defaults to existing axctl login or paxai.app)"
+    ),
     space_id: str = typer.Option(None, "--space-id", "-s", help="Optional default space for managed agents"),
     as_json: bool = JSON_OPTION,
 ):
@@ -3105,7 +3333,9 @@ def login(
     registry.setdefault("gateway", {})
     registry["gateway"]["session_connected"] = True
     save_gateway_registry(registry)
-    record_gateway_activity("gateway_login", username=me.get("username"), base_url=resolved_base_url, space_id=selected_space)
+    record_gateway_activity(
+        "gateway_login", username=me.get("username"), base_url=resolved_base_url, space_id=selected_space
+    )
 
     result = {
         "session_path": str(path),
@@ -3160,8 +3390,23 @@ def status(as_json: bool = JSON_OPTION):
         )
     if payload["agents"]:
         print_table(
-            ["Agent", "Type", "Mode", "Presence", "Output", "Confidence", "Acting As", "Current Space", "Seen", "Backlog", "Reason"],
-            [{**agent, "type": _agent_type_label(agent), "output": _agent_output_label(agent)} for agent in payload["agents"]],
+            [
+                "Agent",
+                "Type",
+                "Mode",
+                "Presence",
+                "Output",
+                "Confidence",
+                "Acting As",
+                "Current Space",
+                "Seen",
+                "Backlog",
+                "Reason",
+            ],
+            [
+                {**agent, "type": _agent_type_label(agent), "output": _agent_output_label(agent)}
+                for agent in payload["agents"]
+            ],
             keys=[
                 "name",
                 "type",
@@ -3249,12 +3494,7 @@ def _gateway_cli_argv(*args: str) -> list[str]:
     resolved = shutil.which("ax") or shutil.which("axctl")
     if resolved:
         return [resolved, *args]
-    command = (
-        "import sys; "
-        "from ax_cli.main import main; "
-        "sys.argv = ['ax'] + sys.argv[1:]; "
-        "main()"
-    )
+    command = "import sys; from ax_cli.main import main; sys.argv = ['ax'] + sys.argv[1:]; main()"
     return [sys.executable, "-c", command, *args]
 
 
@@ -3312,7 +3552,7 @@ def _wait_for_ui_ready(process: subprocess.Popen[bytes], *, host: str, port: int
         return False
 
 
-def _terminate_pids(pids: list[int], *, timeout: float = 3.0) -> tuple[list[int], list[int]]:
+def _terminate_pids(pids: list[int], *, timeout: float = 8.0) -> tuple[list[int], list[int]]:
     requested: list[int] = []
     forced: list[int] = []
     for pid in sorted(set(pids)):
@@ -3406,7 +3646,9 @@ def start(
                 daemon_started = True
             else:
                 detail = _tail_log_lines(daemon_log_path())
-                err_console.print(f"[red]Failed to start Gateway daemon.[/red] {detail or 'Check gateway.log for details.'}")
+                err_console.print(
+                    f"[red]Failed to start Gateway daemon.[/red] {detail or 'Check gateway.log for details.'}"
+                )
                 raise typer.Exit(1)
         else:
             daemon_note = "Gateway is not logged in yet; the UI can still start in disconnected mode."
@@ -3649,8 +3891,12 @@ def deny_approval(
 @agents_app.command("add")
 def add_agent(
     name: str = typer.Argument(..., help="Managed agent name"),
-    template_id: str = typer.Option(None, "--template", help="Agent template: echo_test | ollama | hermes | claude_code_channel"),
-    runtime_type: str = typer.Option(None, "--type", help="Advanced/internal runtime backend: echo | exec | inbox"),
+    template_id: str = typer.Option(
+        None, "--template", help="Agent template: echo_test | ollama | hermes | sentinel_cli | claude_code_channel"
+    ),
+    runtime_type: str = typer.Option(
+        None, "--type", help="Advanced/internal runtime backend: echo | exec | hermes_sentinel | sentinel_cli | inbox"
+    ),
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Ollama model override for the Ollama template"),
@@ -3697,7 +3943,11 @@ def add_agent(
 def update_agent(
     name: str = typer.Argument(..., help="Managed agent name"),
     template_id: str = typer.Option(None, "--template", help="Replace the agent template"),
-    runtime_type: str = typer.Option(None, "--type", help="Advanced/internal runtime backend override: echo | exec | inbox"),
+    runtime_type: str = typer.Option(
+        None,
+        "--type",
+        help="Advanced/internal runtime backend override: echo | exec | hermes_sentinel | sentinel_cli | inbox",
+    ),
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Ollama model override for the Ollama template"),

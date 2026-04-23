@@ -131,14 +131,20 @@ The primary agent types start with:
 
 - `Echo (Test)` — built-in ping/echo bot for proving the control plane.
 - `Ollama` — a local-model runtime managed through Gateway.
-- `Hermes` — a local Hermes bridge with rich activity and tool telemetry.
-- `Claude Code Channel` — planned managed channel adapter.
+- `Hermes Sentinel` — a Gateway-managed long-running Hermes coding agent.
+- `Claude Code Channel` — an attached Claude Code session managed and observed by Gateway.
 
 The lower-level runtime backends still exist under `ax gateway runtime-types`
 for advanced/debug use, but they are not the main operator-facing choices.
 Advanced users can still override launch commands and working directories from
 the CLI or the UI's advanced launch section when they are building a custom
 bridge.
+
+See [Gateway Agent Runtimes](docs/gateway-agent-runtimes.md) for the operating
+model. The key migration from the original CLI setup is management, not a new
+agent brain: Gateway owns credentials, launch specs, lifecycle, status, and
+liveness, while Hermes sentinels and Claude Code channels keep the runtime
+patterns that already worked.
 
 Managed `exec` runtimes can now emit structured progress lines back to Gateway
 while they are still working. The bridge prints lines prefixed with
