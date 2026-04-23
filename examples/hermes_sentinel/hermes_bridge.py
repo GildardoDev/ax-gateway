@@ -94,10 +94,9 @@ def _print_reply(text: str) -> None:
     _real_stdout.write(text + "\n")
     _real_stdout.flush()
 
+
 # ─── Resolve hermes-agent location ─────────────────────────────────────────
-HERMES_REPO = Path(
-    os.environ.get("HERMES_REPO_PATH", str(Path.home() / "hermes-agent"))
-).expanduser()
+HERMES_REPO = Path(os.environ.get("HERMES_REPO_PATH", str(Path.home() / "hermes-agent"))).expanduser()
 
 if not HERMES_REPO.exists():
     print(
@@ -146,9 +145,7 @@ def _resolve_provider(model: str) -> dict:
         return {
             "provider": "anthropic",
             "api_mode": "anthropic_messages",
-            "base_url": os.environ.get(
-                "ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"
-            ),
+            "base_url": os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com/v1"),
             "api_key": os.environ.get("ANTHROPIC_API_KEY", ""),
             "model": name,
         }
@@ -167,14 +164,13 @@ def _resolve_provider(model: str) -> dict:
     if not codex_key:
         # Fall back to ~/.hermes/auth.json (the format hermes-cli maintains).
         import json
+
         auth_path = Path.home() / ".hermes" / "auth.json"
         if auth_path.exists():
             try:
                 data = json.loads(auth_path.read_text())
                 providers = data.get("providers") or {}
-                active = data.get("active_provider") or next(
-                    iter(providers.keys()), None
-                )
+                active = data.get("active_provider") or next(iter(providers.keys()), None)
                 tokens = (providers.get(active) or {}).get("tokens") or {}
                 codex_key = tokens.get("access_token", "")
             except (OSError, json.JSONDecodeError):
@@ -275,25 +271,29 @@ def main() -> int:
         args = args_dict if isinstance(args_dict, dict) else {}
         activity = _tool_activity(tool_name, args)
         try:
-            _emit_event({
-                "kind": "tool_start",
-                "tool_name": tool_name,
-                "tool_action": tool_name,
-                "tool_call_id": tool_call_id,
-                "status": "tool_call",
-                "arguments": args,
-                "activity": activity,
-                "message": activity,
-            })
-            _emit_event({
-                "kind": "tool_result",
-                "tool_name": tool_name,
-                "tool_action": tool_name,
-                "tool_call_id": tool_call_id,
-                "status": "tool_complete",
-                "activity": activity,
-                "message": activity,
-            })
+            _emit_event(
+                {
+                    "kind": "tool_start",
+                    "tool_name": tool_name,
+                    "tool_action": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "status": "tool_call",
+                    "arguments": args,
+                    "activity": activity,
+                    "message": activity,
+                }
+            )
+            _emit_event(
+                {
+                    "kind": "tool_result",
+                    "tool_name": tool_name,
+                    "tool_action": tool_name,
+                    "tool_call_id": tool_call_id,
+                    "status": "tool_complete",
+                    "activity": activity,
+                    "message": activity,
+                }
+            )
         except Exception:
             pass  # never let event emission break the agent run
 
@@ -307,10 +307,16 @@ def main() -> int:
         tool_delay=0.5,
         quiet_mode=True,
         skip_context_files=True,  # explicit prompt only — no auto CLAUDE.md
-        skip_memory=True,         # see Design notes in module docstring
+        skip_memory=True,  # see Design notes in module docstring
         disabled_toolsets=[
-            "web", "browser", "image_generation", "tts", "vision",
-            "cronjob", "rl_training", "homeassistant",
+            "web",
+            "browser",
+            "image_generation",
+            "tts",
+            "vision",
+            "cronjob",
+            "rl_training",
+            "homeassistant",
         ],
         tool_progress_callback=_on_tool_progress,
     )
