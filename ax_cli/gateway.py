@@ -3777,6 +3777,14 @@ def _run_exec_handler(
         env["AX_GATEWAY_MESSAGE_ID"] = message_id
     if space_id:
         env["AX_GATEWAY_SPACE_ID"] = space_id
+    # Expose the composed system prompt (operator role + gateway environment
+    # context) so exec-runtime bridges (Ollama, custom python bridges, etc.)
+    # can read it via env. Hermes / Claude / Sentinel pass the prompt as a
+    # CLI flag instead — this env var is for runtimes that aren't built by
+    # _build_hermes_sentinel_cmd / _build_sentinel_claude_cmd.
+    composed_prompt = _compose_agent_system_prompt(entry)
+    if composed_prompt:
+        env["AX_AGENT_SYSTEM_PROMPT"] = composed_prompt
     try:
         process = subprocess.Popen(
             argv,
@@ -3932,6 +3940,63 @@ def _hermes_sentinel_workdir(entry: dict[str, Any]) -> Path:
     return Path("/home/ax-agent/agents") / str(entry.get("name") or "agent")
 
 
+def _gateway_environment_context(entry: dict[str, Any]) -> str:
+    """Build the gateway-supplied environment context that is appended to the
+    operator's per-agent system prompt.
+
+    Tells the agent (a) what aX is, (b) that it's part of a multi-agent
+    network and how collaboration works, and (c) the minimal CLI it can
+    use to interact with other agents. Kept short and concrete — long
+    appended prompts dilute the operator's role instructions.
+    """
+    name = str(entry.get("name") or "").strip() or "<this agent>"
+    space_id = str(entry.get("space_id") or entry.get("active_space_id") or "").strip()
+    space_name = str(entry.get("active_space_name") or entry.get("space_name") or "").strip()
+    space_label = space_name or space_id or "<unknown space>"
+    base_url = str(entry.get("base_url") or "https://paxai.app").strip()
+    lines = [
+        "--- aX environment context ---",
+        f"You are @{name}, an aX agent on a multi-agent network at {base_url}.",
+        f"Your active space: {space_label}.",
+        "",
+        "Collaboration model:",
+        "- Other agents in your space may @-mention you. They expect a reply.",
+        "- Reply on the same thread by passing the incoming message_id as parent_id.",
+        "- @-mention other agents by name to delegate or ask for help.",
+        "- A separate Gateway daemon brokers your credentials and routes messages —",
+        "  you do not need to manage tokens yourself.",
+        "",
+        "CLI you can use from your shell:",
+        '  ax send "@target your message"            # send a new message',
+        '  ax send -p <message_id> "..."             # reply on a thread',
+        "  ax messages list                           # read your inbox",
+        '  ax tasks create "title" --assign-to <agent>  # delegate work',
+        "  ax tasks list                              # see open tasks for you",
+        "  ax agents list                             # see who is online",
+        "",
+        "Operator-supplied role instructions (above) take precedence over this",
+        "environment context. If a field above (space, base_url) is missing, fall",
+        "back to the values in your local .ax/config.toml.",
+    ]
+    return "\n".join(lines)
+
+
+def _compose_agent_system_prompt(entry: dict[str, Any]) -> str | None:
+    """Combine the operator's per-agent system prompt with the gateway-supplied
+    environment context. Operator prompt comes first (the agent's role
+    identity); gateway context is appended (the collaboration environment).
+
+    Returns None when neither piece is present so the runtime command builder
+    omits the flag entirely instead of passing an empty string.
+    """
+    operator_prompt = str(entry.get("system_prompt") or "").strip()
+    if str(entry.get("system_prompt_skip_environment") or "").strip().lower() in {"1", "true", "yes"}:
+        return operator_prompt or None
+    environment = _gateway_environment_context(entry)
+    parts = [p for p in (operator_prompt, environment) if p]
+    return "\n\n".join(parts) if parts else None
+
+
 def _build_hermes_sentinel_cmd(entry: dict[str, Any]) -> list[str]:
     timeout = str(entry.get("timeout_seconds") or entry.get("timeout") or 600)
     update_interval = str(entry.get("update_interval") or 2.0)
@@ -3955,9 +4020,9 @@ def _build_hermes_sentinel_cmd(entry: dict[str, Any]) -> list[str]:
     allowed_tools = str(entry.get("allowed_tools") or "").strip()
     if allowed_tools:
         cmd.extend(["--allowed-tools", allowed_tools])
-    system_prompt = str(entry.get("system_prompt") or "").strip()
-    if system_prompt:
-        cmd.extend(["--system-prompt", system_prompt])
+    composed_prompt = _compose_agent_system_prompt(entry)
+    if composed_prompt:
+        cmd.extend(["--system-prompt", composed_prompt])
     if _bool_with_fallback(entry.get("disable_codex_mcp"), fallback=False):
         cmd.append("--disable-codex-mcp")
     return cmd
@@ -4079,9 +4144,9 @@ def _build_sentinel_claude_cmd(entry: dict[str, Any], session_id: str | None) ->
     allowed_tools = str(entry.get("allowed_tools") or "").strip()
     if allowed_tools:
         cmd.extend(["--allowedTools", allowed_tools])
-    system_prompt = str(entry.get("system_prompt") or "").strip()
-    if system_prompt:
-        cmd.extend(["--append-system-prompt", system_prompt])
+    composed_prompt = _compose_agent_system_prompt(entry)
+    if composed_prompt:
+        cmd.extend(["--append-system-prompt", composed_prompt])
     return cmd
 
 

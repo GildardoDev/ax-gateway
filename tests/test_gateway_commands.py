@@ -819,8 +819,12 @@ def test_gateway_agents_add_claude_code_channel_registers_gateway_identity_runni
     assert workspace_context.exists()
     assert "multi-user, multi-agent network" in workspace_context.read_text()
     assert "Do not ask the user for a PAT" in workspace_context.read_text()
-    assert (tmp_path / "orion" / "AGENTS.md").exists()
-    assert (tmp_path / "orion" / "CLAUDE.md").exists()
+    # Claude Code reads CLAUDE.md natively; the auto-generated marker
+    # section lands there. AGENTS.md is the Hermes-side convention and is
+    # not written for claude_code_channel agents.
+    claude_md = tmp_path / "orion" / "CLAUDE.md"
+    assert claude_md.exists()
+    assert "BEGIN ax-gateway-agent-context" in claude_md.read_text()
 
 
 def test_claude_code_channel_ignores_stale_mailbox_backlog_for_presence():
@@ -5272,6 +5276,232 @@ def test_sweep_does_not_auto_unhide_on_reconnect(monkeypatch, tmp_path):
     assert entry["hidden_reason"] == "operator_cleanup"
     recent = gateway_core.load_recent_gateway_activity()
     assert not any(r.get("event") == "managed_agent_unhidden" for r in recent)
+
+
+def test_compose_agent_system_prompt_combines_operator_and_environment():
+    """Composed prompt = operator's role text first, gateway environment
+    context second. Operator instructions take precedence; the appended
+    context tells the agent it's on a multi-agent network and how to use
+    the CLI."""
+    entry = {
+        "name": "mission_orchestrator",
+        "space_id": "ceb7e238-3e9d-4bcd-aaaf-27765c24f58c",
+        "active_space_name": "GBR — Ground-Based Radar AI Agent Architecture",
+        "base_url": "https://paxai.app",
+        "system_prompt": "You coordinate the Golden Dome mission. Delegate sensor work.",
+    }
+    composed = gateway_core._compose_agent_system_prompt(entry)
+    assert composed is not None
+    # Operator first.
+    assert composed.startswith("You coordinate the Golden Dome mission.")
+    # Gateway context appended.
+    assert "aX environment context" in composed
+    assert "@mission_orchestrator" in composed
+    assert "GBR — Ground-Based Radar AI Agent Architecture" in composed
+    assert "https://paxai.app" in composed
+    # CLI usage included so the agent knows how to interact.
+    assert "ax send" in composed
+    assert "ax tasks create" in composed
+    assert "ax messages list" in composed
+
+
+def test_compose_agent_system_prompt_with_no_operator_prompt_still_returns_environment():
+    """An agent without an operator prompt still gets the environment
+    context — every agent should know it's on the network."""
+    entry = {"name": "echo-bot", "space_id": "space-1", "base_url": "https://paxai.app"}
+    composed = gateway_core._compose_agent_system_prompt(entry)
+    assert composed is not None
+    assert "aX environment context" in composed
+    assert "@echo-bot" in composed
+
+
+def test_compose_agent_system_prompt_skip_environment_returns_operator_only():
+    """Escape hatch for an operator who wants the environment context off:
+    setting system_prompt_skip_environment returns just the operator text."""
+    entry = {
+        "name": "specialist",
+        "system_prompt": "You are a specialist.",
+        "system_prompt_skip_environment": "true",
+    }
+    composed = gateway_core._compose_agent_system_prompt(entry)
+    assert composed == "You are a specialist."
+
+
+def test_hermes_command_includes_composed_system_prompt():
+    """The Hermes runtime command builder must pass the composed prompt
+    (operator + environment) via --system-prompt, not just the operator's
+    text alone."""
+    entry = {
+        "name": "sensor_fusion",
+        "system_prompt": "Fuse sensor inputs into a coherent track.",
+        "space_id": "space-x",
+        "active_space_name": "GBR",
+        "base_url": "https://paxai.app",
+        "workdir": "/tmp/hermes-fusion",
+        "runtime_type": "hermes_sentinel",
+    }
+    cmd = gateway_core._build_hermes_sentinel_cmd(entry)
+    assert "--system-prompt" in cmd
+    payload_index = cmd.index("--system-prompt") + 1
+    payload = cmd[payload_index]
+    assert payload.startswith("Fuse sensor inputs")
+    assert "aX environment context" in payload
+    assert "ax send" in payload
+
+
+def test_claude_command_includes_composed_system_prompt_via_append_flag():
+    """Claude/Sentinel command builder uses --append-system-prompt; same
+    composed contents must flow through."""
+    entry = {
+        "name": "threat_classifier",
+        "system_prompt": "You classify aerial threats by signature.",
+        "space_id": "space-y",
+        "active_space_name": "GBR",
+        "base_url": "https://paxai.app",
+        "workdir": "/tmp/claude-threat",
+        "runtime_type": "sentinel_cli",
+    }
+    cmd = gateway_core._build_sentinel_claude_cmd(entry, session_id=None)
+    assert "--append-system-prompt" in cmd
+    payload_index = cmd.index("--append-system-prompt") + 1
+    payload = cmd[payload_index]
+    assert payload.startswith("You classify aerial threats by signature.")
+    assert "aX environment context" in payload
+
+
+def test_exec_runtime_exposes_composed_prompt_via_env(monkeypatch, tmp_path):
+    """exec-runtime bridges (Ollama, custom python bridges) read the operator
+    prompt via AX_AGENT_SYSTEM_PROMPT. Without this wiring, an Ollama agent
+    with a system_prompt set in the registry would never see it because the
+    bridge is launched as a subprocess and gets no CLI flag."""
+    captured: dict = {}
+
+    class _StubProcess:
+        returncode = 0
+        stdout = None
+        stderr = None
+        pid = 12345
+
+        def wait(self, *args, **kwargs):
+            return 0
+
+        def kill(self):
+            pass
+
+    def _fake_popen(argv, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        captured["argv"] = list(argv)
+        return _StubProcess()
+
+    monkeypatch.setattr(gateway_core.subprocess, "Popen", _fake_popen)
+
+    entry = {
+        "name": "gbr-orchestrator",
+        "system_prompt": "You orchestrate the GBR mission.",
+        "space_id": "ceb7e238",
+        "active_space_name": "GBR",
+        "base_url": "https://paxai.app",
+        "exec_command": "python3 /tmp/fake-bridge.py",
+        "runtime_type": "exec",
+    }
+
+    output = gateway_core._run_exec_handler(
+        "python3 /tmp/fake-bridge.py", "hello", entry, message_id="m1", space_id="ceb7e238"
+    )
+    # Subprocess wasn't real, so output is "(no output)" — that's fine; we're
+    # asserting on the captured env, not the result.
+    assert "AX_AGENT_SYSTEM_PROMPT" in captured["env"]
+    composed = captured["env"]["AX_AGENT_SYSTEM_PROMPT"]
+    assert composed.startswith("You orchestrate the GBR mission.")
+    assert "aX environment context" in composed
+    assert output == "(no output)"
+
+
+def test_exec_runtime_skips_env_var_when_no_prompt(monkeypatch, tmp_path):
+    """No system_prompt and (extreme edge case) skip-environment set → don't
+    set the env var at all. Bridges fall back to their built-in defaults."""
+    captured: dict = {}
+
+    class _StubProcess:
+        returncode = 0
+        stdout = None
+        stderr = None
+
+        def wait(self, *args, **kwargs):
+            return 0
+
+        def kill(self):
+            pass
+
+    def _fake_popen(argv, **kwargs):
+        captured["env"] = dict(kwargs.get("env") or {})
+        return _StubProcess()
+
+    monkeypatch.setattr(gateway_core.subprocess, "Popen", _fake_popen)
+
+    entry = {
+        "name": "no-persona",
+        "system_prompt_skip_environment": "true",
+        "exec_command": "python3 /tmp/fake-bridge.py",
+        "runtime_type": "exec",
+    }
+    gateway_core._run_exec_handler("python3 /tmp/fake-bridge.py", "hello", entry)
+    assert "AX_AGENT_SYSTEM_PROMPT" not in captured["env"]
+
+
+def test_resolve_system_prompt_input_rejects_both_flags(tmp_path):
+    """Operator hygiene: --system-prompt and --system-prompt-file are
+    mutually exclusive."""
+    prompt_file = tmp_path / "role.md"
+    prompt_file.write_text("from file")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        gateway_cmd._resolve_system_prompt_input(
+            system_prompt="from cli",
+            system_prompt_file=str(prompt_file),
+        )
+
+
+def test_resolve_system_prompt_input_reads_file(tmp_path):
+    prompt_file = tmp_path / "role.md"
+    prompt_file.write_text("  multi-line\n  prompt body  \n")
+    resolved = gateway_cmd._resolve_system_prompt_input(
+        system_prompt=None,
+        system_prompt_file=str(prompt_file),
+    )
+    # Strips whitespace.
+    assert resolved == "multi-line\n  prompt body"
+
+
+def test_resolve_system_prompt_input_missing_file_raises(tmp_path):
+    with pytest.raises(ValueError, match="not found"):
+        gateway_cmd._resolve_system_prompt_input(
+            system_prompt=None,
+            system_prompt_file=str(tmp_path / "does-not-exist.md"),
+        )
+
+
+def test_agent_workspace_context_text_includes_operator_prompt():
+    """When the entry has a system_prompt, the AGENT_CONTEXT.md written
+    to .ax/ must surface it so the operator can inspect the persona
+    without having to dig into the registry."""
+    entry = {
+        "name": "satellite_resilience",
+        "template_id": "claude_code_channel",
+        "runtime_type": "claude_code_channel",
+        "system_prompt": "You harden satellite comms against jamming.",
+    }
+    text = gateway_cmd._agent_workspace_context_text(entry, workdir="/tmp/satrez")
+    assert "Operator-supplied role instructions" in text
+    assert "You harden satellite comms against jamming." in text
+
+
+def test_agent_workspace_context_text_without_prompt_shows_how_to_set_one():
+    """Without a system_prompt, the doc points the operator at the
+    `ax gateway agents update --system-prompt` command."""
+    entry = {"name": "no-persona", "template_id": "hermes", "runtime_type": "hermes_sentinel"}
+    text = gateway_cmd._agent_workspace_context_text(entry, workdir="/tmp/no-persona")
+    assert "No operator-supplied system prompt is configured" in text
+    assert "ax gateway agents update no-persona --system-prompt" in text
 
 
 def test_sweep_skips_hidden_agents_no_upstream(monkeypatch, tmp_path):

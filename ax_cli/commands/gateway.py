@@ -963,6 +963,29 @@ def _hydrate_entry_space_from_database(registry: dict, entry: dict) -> str | Non
     return space_id
 
 
+def _resolve_system_prompt_input(
+    *, system_prompt: str | None, system_prompt_file: str | None, current: str | None = None
+) -> str | None:
+    """Resolve the operator's system-prompt input from either a literal value
+    or a file path. Mutual exclusion: only one of ``--system-prompt`` /
+    ``--system-prompt-file`` may be set per call.
+
+    Returns the resolved text, or ``current`` (the existing entry value) when
+    neither flag was supplied. An empty string from either source is treated
+    as "clear the prompt" and returns ``""``; ``None`` means "no change".
+    """
+    if system_prompt is not None and system_prompt_file is not None:
+        raise ValueError("--system-prompt and --system-prompt-file are mutually exclusive.")
+    if system_prompt_file is not None:
+        path = Path(system_prompt_file).expanduser()
+        if not path.is_file():
+            raise ValueError(f"System prompt file not found: {path}")
+        return path.read_text(encoding="utf-8").strip()
+    if system_prompt is not None:
+        return system_prompt.strip()
+    return current
+
+
 def _register_managed_agent(
     *,
     name: str,
@@ -975,6 +998,7 @@ def _register_managed_agent(
     audience: str = "both",
     description: str | None = None,
     model: str | None = None,
+    system_prompt: str | None = None,
     timeout_seconds: int | None = None,
     start: bool = True,
 ) -> dict:
@@ -1048,7 +1072,8 @@ def _register_managed_agent(
             max_retries=INTERACTIVE_429_MAX_RETRIES,
             base_wait=INTERACTIVE_429_BASE_WAIT,
         )
-    _polish_metadata(client, name=name, bio=None, specialization=None, system_prompt=None)
+    normalized_system_prompt = (system_prompt or "").strip() or None
+    _polish_metadata(client, name=name, bio=None, specialization=None, system_prompt=normalized_system_prompt)
 
     agent_id = str(agent.get("id") or agent.get("agent_id") or "")
     token, pat_source = _with_upstream_429_retry(
@@ -1092,6 +1117,8 @@ def _register_managed_agent(
         "requires_approval": requires_approval,
         "added_at": datetime.now(timezone.utc).isoformat(),
     }
+    if normalized_system_prompt:
+        entry_payload["system_prompt"] = normalized_system_prompt
     if requires_approval:
         entry_payload["install_id"] = str(uuid.uuid4())
     entry = upsert_agent_entry(registry, entry_payload)
@@ -1123,6 +1150,34 @@ def _agent_workspace_context_text(entry: dict, *, workdir: str) -> str:
     name = str(entry.get("name") or "agent").strip()
     template = str(entry.get("template_id") or entry.get("runtime_type") or "gateway").strip()
     runtime = str(entry.get("runtime_type") or "gateway").strip()
+    operator_prompt = str(entry.get("system_prompt") or "").strip()
+    persona_section = (
+        f"""## Operator-supplied role instructions
+
+The operator registered this agent with the following system prompt. These
+take precedence over the generic guidance below. They were passed to the
+runtime via `--system-prompt` (Hermes / OpenAI-compatible) or
+`--append-system-prompt` (Claude Code).
+
+```
+{operator_prompt}
+```
+
+"""
+        if operator_prompt
+        else """## Operator-supplied role instructions
+
+No operator-supplied system prompt is configured for this agent. To set one,
+run from your control workspace:
+
+```bash
+ax gateway agents update {name} --system-prompt "Your role instructions..."
+# or, from a file:
+ax gateway agents update {name} --system-prompt-file ./role.md
+```
+
+""".replace("{name}", name)
+    )
     return f"""# aX Agent Context
 
 You are `@{name}`, an agent connected to the aX multi-user, multi-agent network through the local Gateway.
@@ -1135,7 +1190,7 @@ Identity and runtime:
 - Runtime folder: `{workdir}`
 - Gateway URL: `http://127.0.0.1:8765`
 
-How to use aX from this folder:
+{persona_section}## How to use aX from this folder
 
 ```bash
 ax gateway local connect --workdir .
@@ -1143,7 +1198,7 @@ ax gateway local inbox --workdir .
 ax gateway local send --workdir . "@agent_name message"
 ```
 
-Guidelines:
+## Guidelines
 
 - Use the Gateway CLI from this folder for aX messages, inbox checks, tasks, and context.
 - Do not ask the user for a PAT and do not store user tokens in this folder.
@@ -1199,6 +1254,107 @@ def _write_agent_context_hint(path: Path, *, agent_name: str, context_path: Path
     )
 
 
+_AGENT_CONTEXT_MARKER_BEGIN = "<!-- BEGIN ax-gateway-agent-context (auto-generated; do not edit by hand) -->"
+_AGENT_CONTEXT_MARKER_END = "<!-- END ax-gateway-agent-context -->"
+
+
+def _render_agent_persona_markdown(entry: dict, *, workdir: str) -> str:
+    """Body of the auto-generated section that's written into the runtime's
+    native context file (CLAUDE.md for Claude Code, AGENTS.md for Hermes).
+
+    Layout: operator-supplied role first (the agent's identity), then the
+    generic aX network/CLI guidance the agent needs to collaborate. Mirrors
+    `_compose_agent_system_prompt` in ax_cli/gateway.py — same ordering, so
+    what the runtime gets via `--system-prompt` matches what the human sees
+    in the workdir doc.
+    """
+    name = str(entry.get("name") or "agent").strip()
+    operator_prompt = str(entry.get("system_prompt") or "").strip()
+    persona_block = (
+        f"## Role\n\n{operator_prompt}\n"
+        if operator_prompt
+        else (
+            "## Role\n\n"
+            "_No operator-supplied system prompt is configured for this agent._\n\n"
+            "To set one, from your control workspace run:\n\n"
+            "```bash\n"
+            f'ax gateway agents update {name} --system-prompt "Your role instructions..."\n'
+            "```\n"
+        )
+    )
+    return f"""# `@{name}` — aX agent context
+
+You are `@{name}`, an agent on the aX multi-agent network. Other agents may
+@-mention you. The Gateway daemon brokers your credentials; you don't manage
+tokens directly.
+
+- Workdir: `{workdir}`
+- Gateway: http://127.0.0.1:8765
+
+{persona_block}
+## Collaboration model
+
+- Reply on the same thread by passing the incoming message_id as parent_id.
+- @-mention other agents by name to delegate or ask for help.
+- See who is online, route work, and read your inbox via the CLI below.
+
+## CLI
+
+```bash
+ax send "@target your message"           # send a new message
+ax send -p <message_id> "..."             # reply on a thread
+ax messages list                           # read your inbox
+ax tasks create "title" --assign-to <agent>  # delegate work
+ax tasks list                              # open tasks for you
+ax agents list                             # see who is online
+```
+"""
+
+
+def _write_marker_section(path: Path, *, body: str) -> None:
+    """Idempotently install or refresh the auto-generated agent-context
+    section in the given file.
+
+    - File missing: write a new file containing only the section.
+    - File exists with the markers: replace the section in place.
+    - File exists without the markers: prepend the section so the LLM sees
+      the persona before any user content. Preserves user content.
+    """
+    section = f"{_AGENT_CONTEXT_MARKER_BEGIN}\n\n{body.rstrip()}\n\n{_AGENT_CONTEXT_MARKER_END}\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.exists():
+        path.write_text(section, encoding="utf-8")
+        return
+    existing = path.read_text(encoding="utf-8")
+    if _AGENT_CONTEXT_MARKER_BEGIN in existing and _AGENT_CONTEXT_MARKER_END in existing:
+        head, _, rest = existing.partition(_AGENT_CONTEXT_MARKER_BEGIN)
+        _, _, tail = rest.partition(_AGENT_CONTEXT_MARKER_END)
+        # Strip the leftover newline immediately after the end marker so the
+        # tail re-attaches cleanly. Preserve the rest of tail verbatim.
+        if tail.startswith("\n"):
+            tail = tail[1:]
+        path.write_text(head + section + tail, encoding="utf-8")
+        return
+    # No markers — prepend so the persona is the first thing the LLM reads.
+    path.write_text(section + "\n" + existing, encoding="utf-8")
+
+
+def _agent_runtime_context_target(entry: dict, *, workdir: Path) -> Path | None:
+    """Map a managed-agent entry to the runtime-native context file.
+
+    Claude Code reads CLAUDE.md from the workdir; Hermes' sentinel reads
+    AGENTS.md (with CLAUDE.md fallback). Returns None for templates that
+    don't have a workdir-based runtime convention.
+    """
+    template = str(entry.get("template_id") or "").strip().lower()
+    runtime = str(entry.get("runtime_type") or "").strip().lower()
+    if template == "claude_code_channel" or runtime == "claude_code_channel":
+        return workdir / "CLAUDE.md"
+    if template in {"hermes", "sentinel_cli"} or runtime in {"hermes_sentinel", "sentinel_cli"}:
+        return workdir / "AGENTS.md"
+    return None
+
+
 def _write_agent_workspace_config(entry: dict) -> None:
     template = str(entry.get("template_id") or "").strip().lower()
     runtime = str(entry.get("runtime_type") or "").strip().lower()
@@ -1222,9 +1378,13 @@ def _write_agent_workspace_config(entry: dict) -> None:
     (config_dir / "README.md").write_text(_agent_workspace_readme_text(entry, workdir=str(root)))
     context_path = config_dir / "AGENT_CONTEXT.md"
     context_path.write_text(_agent_workspace_context_text(entry, workdir=str(root)), encoding="utf-8")
-    _write_agent_context_hint(root / "AGENTS.md", agent_name=name, context_path=Path(".ax") / "AGENT_CONTEXT.md")
-    if template == "claude_code_channel" or runtime == "claude_code_channel":
-        _write_agent_context_hint(root / "CLAUDE.md", agent_name=name, context_path=Path(".ax") / "AGENT_CONTEXT.md")
+
+    # Also write the persona into the file the runtime reads natively
+    # (CLAUDE.md for Claude Code, AGENTS.md for Hermes). Use a marker-bounded
+    # section so user-authored content in those files is preserved on re-write.
+    target = _agent_runtime_context_target(entry, workdir=root)
+    if target is not None:
+        _write_marker_section(target, body=_render_agent_persona_markdown(entry, workdir=str(root)))
 
 
 def _update_managed_agent(
@@ -1237,6 +1397,7 @@ def _update_managed_agent(
     ollama_model: str | object = _UNSET,
     description: str | None = None,
     model: str | None = None,
+    system_prompt: str | object = _UNSET,
     timeout_seconds: int | object = _UNSET,
     desired_state: str | None = None,
 ) -> dict:
@@ -1307,9 +1468,23 @@ def _update_managed_agent(
         entry["timeout_seconds"] = _normalize_timeout_seconds(timeout_seconds)  # type: ignore[arg-type]
 
     session = _load_gateway_session_or_exit()
-    if description or model:
+    upstream_fields: dict = {}
+    if description:
+        upstream_fields["description"] = description
+    if model:
+        upstream_fields["model"] = model
+    if system_prompt is not _UNSET:
+        sp_value = str(system_prompt).strip() if system_prompt else ""  # type: ignore[arg-type]
+        upstream_fields["system_prompt"] = sp_value or None
+    if upstream_fields:
         client = _load_gateway_user_client()
-        client.update_agent(name, **{k: v for k, v in {"description": description, "model": model}.items() if v})
+        client.update_agent(name, **upstream_fields)
+    if system_prompt is not _UNSET:
+        sp_value = str(system_prompt).strip() if system_prompt else ""  # type: ignore[arg-type]
+        if sp_value:
+            entry["system_prompt"] = sp_value
+        else:
+            entry.pop("system_prompt", None)
 
     if template:
         entry["template_id"] = template.get("id")
@@ -5369,6 +5544,17 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                     )
                     _write_json_response(self, payload)
                     return
+                if parsed.path.endswith("/system-prompt") and parsed.path.startswith("/api/agents/"):
+                    name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/system-prompt")).strip()
+                    raw = body.get("system_prompt")
+                    next_value: str | object
+                    if raw is None:
+                        next_value = ""
+                    else:
+                        next_value = str(raw)
+                    payload = _update_managed_agent(name=name, system_prompt=next_value)
+                    _write_json_response(self, payload)
+                    return
                 if parsed.path.endswith("/pin") and parsed.path.startswith("/api/agents/"):
                     name = unquote(parsed.path.removeprefix("/api/agents/").removesuffix("/pin")).strip()
                     payload = _set_managed_agent_pin(name, bool(body.get("pinned", True)))
@@ -5595,11 +5781,23 @@ def _render_agent_detail(entry: dict, *, activity: list[dict]) -> Group:
     paths.add_row("Exec", str(entry.get("exec_command") or "-"))
     paths.add_row("Added", _format_timestamp(entry.get("added_at")))
 
-    return Group(
+    panels = [
         Panel(overview, title=f"Managed Agent · @{entry.get('name')}", border_style="cyan"),
         Panel(paths, title="Runtime Details", border_style="blue"),
-        Panel(_render_activity_table(activity), title="Recent Agent Activity", border_style="magenta"),
-    )
+    ]
+
+    operator_prompt = str(entry.get("system_prompt") or "").strip()
+    if operator_prompt:
+        prompt_panel_body = operator_prompt
+    else:
+        prompt_panel_body = (
+            "(none) — set with: ax gateway agents update "
+            f"{entry.get('name') or '<name>'} --system-prompt '<your role instructions>'"
+        )
+    panels.append(Panel(prompt_panel_body, title="Operator System Prompt", border_style="green"))
+    panels.append(Panel(_render_activity_table(activity), title="Recent Agent Activity", border_style="magenta"))
+
+    return Group(*panels)
 
 
 @app.command("login")
@@ -7167,6 +7365,16 @@ def add_agent(
     audience: str = typer.Option("both", "--audience", help="Minted PAT audience"),
     description: str = typer.Option(None, "--description", help="Create/update description"),
     model: str = typer.Option(None, "--model", help="Create/update model"),
+    system_prompt: str = typer.Option(
+        None,
+        "--system-prompt",
+        help="Operator-supplied system instructions describing the agent's role. Appended with the gateway's environment context (multi-agent network awareness + CLI usage) when handed to the runtime.",
+    ),
+    system_prompt_file: str = typer.Option(
+        None,
+        "--system-prompt-file",
+        help="Path to a file containing the system prompt. Mutually exclusive with --system-prompt.",
+    ),
     timeout_seconds: int = typer.Option(
         None, "--timeout", "--timeout-seconds", help="Max seconds a runtime may process one message"
     ),
@@ -7176,6 +7384,11 @@ def add_agent(
     """Register a managed agent and mint a Gateway-owned PAT for it."""
     selected_template = template_id or ("echo_test" if not runtime_type else None)
     try:
+        resolved_prompt = _resolve_system_prompt_input(
+            system_prompt=system_prompt,
+            system_prompt_file=system_prompt_file,
+            current=None,
+        )
         entry = _register_managed_agent(
             name=name,
             template_id=selected_template,
@@ -7187,6 +7400,7 @@ def add_agent(
             audience=audience,
             description=description,
             model=model,
+            system_prompt=resolved_prompt,
             timeout_seconds=timeout_seconds,
             start=start,
         )
@@ -7222,6 +7436,16 @@ def update_agent(
     ollama_model: str = typer.Option(None, "--ollama-model", help="Ollama model override for the Ollama template"),
     description: str = typer.Option(None, "--description", help="Update platform agent description"),
     model: str = typer.Option(None, "--model", help="Update platform agent model"),
+    system_prompt: str = typer.Option(
+        None,
+        "--system-prompt",
+        help="Replace the operator-supplied system instructions. Pass an empty string to clear. Appended with the gateway's environment context at runtime.",
+    ),
+    system_prompt_file: str = typer.Option(
+        None,
+        "--system-prompt-file",
+        help="Path to a file containing the system prompt. Mutually exclusive with --system-prompt.",
+    ),
     timeout_seconds: int = typer.Option(
         None, "--timeout", "--timeout-seconds", help="Max seconds a runtime may process one message"
     ),
@@ -7230,6 +7454,17 @@ def update_agent(
 ):
     """Update a managed agent without redoing Gateway bootstrap."""
     try:
+        prompt_unset = system_prompt is None and system_prompt_file is None
+        resolved_prompt: str | object = _UNSET
+        if not prompt_unset:
+            resolved_prompt = (
+                _resolve_system_prompt_input(
+                    system_prompt=system_prompt,
+                    system_prompt_file=system_prompt_file,
+                    current=None,
+                )
+                or ""
+            )
         entry = _update_managed_agent(
             name=name,
             template_id=template_id,
@@ -7239,6 +7474,7 @@ def update_agent(
             ollama_model=ollama_model if ollama_model is not None else _UNSET,
             description=description,
             model=model,
+            system_prompt=resolved_prompt,
             timeout_seconds=timeout_seconds if timeout_seconds is not None else _UNSET,
             desired_state=desired_state,
         )

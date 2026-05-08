@@ -2087,6 +2087,46 @@
         pinToggle,
       ]));
 
+      // System prompt — operator-supplied role instructions. Read + edit
+      // here so the persona is visible alongside the agent and can be
+      // refined without dropping to the CLI. The composed prompt the
+      // runtime actually receives appends gateway environment context;
+      // this textarea shows ONLY the operator-supplied portion.
+      const promptTextarea = makeEl("textarea", {
+        class: "command-pill",
+        rows: 6,
+        placeholder: "Operator-supplied role instructions for this agent. Gateway appends multi-agent network context + CLI usage automatically.",
+      }, [String(agent.system_prompt || "")]);
+      promptTextarea.style.minHeight = "112px";
+      promptTextarea.style.fontSize = "13px";
+      promptTextarea.style.resize = "vertical";
+      const promptStatus = makeEl("div", { class: "hint" }, [agent.system_prompt ? "" : "No operator prompt set."]);
+      const promptSave = makeEl("button", {
+        class: "btn btn-primary",
+        onclick: async (event) => {
+          const btn = event.currentTarget;
+          btn.disabled = true;
+          const next = String(promptTextarea.value || "");
+          try {
+            await api("POST", "/api/agents/" + encodeURIComponent(agent.name) + "/system-prompt", { system_prompt: next });
+            promptStatus.textContent = next.trim() ? "Saved." : "Cleared.";
+            showToast(next.trim() ? "System prompt saved" : "System prompt cleared", "ok");
+            loadAgentDetail(agent.name);
+          } catch (err) {
+            promptStatus.textContent = String(err.message || "Save failed");
+            showToast(err.message || "Save failed", "err");
+          } finally {
+            btn.disabled = false;
+          }
+        },
+      }, ["Save system prompt"]);
+      drawerBody.appendChild(makeEl("section", { class: "drawer-section" }, [
+        makeEl("div", { class: "drawer-label" }, ["System prompt"]),
+        promptTextarea,
+        makeEl("div", { class: "drawer-actions" }, [promptSave]),
+        promptStatus,
+      ]));
+
       // Actions
       const desiredRunning = String(agent.desired_state || "").toLowerCase() !== "stopped";
       const needsApproval = String(agent.approval_state || "").toLowerCase() === "pending" && agent.approval_id;

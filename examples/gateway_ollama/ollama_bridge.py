@@ -146,6 +146,12 @@ def _strip_agent_mention(text: str, agent_name: str) -> str:
 
 
 def _system_prompt(agent_name: str) -> str:
+    # Operator-supplied prompt (composed with gateway environment context by
+    # the daemon) wins when present — lets `ax gateway agents update --system-prompt`
+    # take effect without editing this bridge file.
+    operator_prompt = os.environ.get("AX_AGENT_SYSTEM_PROMPT", "").strip()
+    if operator_prompt:
+        return operator_prompt
     normalized = agent_name.strip().lstrip("@") or "ollama-agent"
     return SYSTEM_PROMPT_TEMPLATE.format(agent_name=normalized).strip()
 

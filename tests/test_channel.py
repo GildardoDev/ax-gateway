@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -791,6 +792,156 @@ def test_channel_delivers_completion_update_after_progress_skip(monkeypatch):
     assert "analysis you requested" in delivered[0].prompt
 
 
+def test_default_local_channel_command_resolves_relative_argv0(monkeypatch, tmp_path):
+    """sys.argv[0] from a relative launcher (.venv/bin/ax) must resolve to
+    an absolute path before being written into .mcp.json. Claude Code
+    launches the channel bridge from the agent workdir, which has no .venv/,
+    so a relative command crashes the MCP server immediately."""
+    venv_bin = tmp_path / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "ax").write_text("#!/bin/sh\nexec axctl \"$@\"\n")
+    (venv_bin / "axctl").write_text("#!/bin/sh\necho ok\n")
+    (venv_bin / "ax").chmod(0o755)
+    (venv_bin / "axctl").chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(channel_mod.sys, "argv", [".venv/bin/ax", "channel", "setup"])
+
+    resolved = channel_mod._default_local_channel_command()
+    assert Path(resolved).is_absolute(), f"expected absolute path, got {resolved!r}"
+    assert resolved.endswith("/.venv/bin/axctl")
+    assert Path(resolved).exists()
+
+
+def test_default_local_channel_command_falls_back_to_path_lookup(monkeypatch, tmp_path):
+    """When sys.argv[0] is a process name (no sibling axctl resolves), use
+    shutil.which to find axctl on PATH and return its absolute path."""
+    monkeypatch.setattr(channel_mod.sys, "argv", ["python"])
+    fake_axctl = tmp_path / "fake-bin" / "axctl"
+    fake_axctl.parent.mkdir(parents=True)
+    fake_axctl.write_text("#!/bin/sh\n")
+    fake_axctl.chmod(0o755)
+    monkeypatch.setenv("PATH", str(fake_axctl.parent))
+
+    resolved = channel_mod._default_local_channel_command()
+    assert resolved == str(fake_axctl.resolve())
+
+
+def test_default_local_channel_command_falls_back_to_bare_when_nothing_resolves(monkeypatch, tmp_path):
+    monkeypatch.setattr(channel_mod.sys, "argv", ["python"])
+    monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+    (tmp_path / "empty").mkdir()
+
+    resolved = channel_mod._default_local_channel_command()
+    assert resolved == "axctl"
+
+
+def test_channel_setup_writes_persona_into_claude_md(monkeypatch, tmp_path):
+    """ax channel setup must surface the operator's system_prompt in CLAUDE.md
+    (the file Claude Code reads natively), not just .ax/AGENT_CONTEXT.md."""
+    monkeypatch.setenv("AX_CONFIG_DIR", str(tmp_path / "config"))
+    token_file = tmp_path / "gateway" / "orion.token"
+    token_file.parent.mkdir(parents=True)
+    token_file.write_text("axp_a_agent.secret\n")
+
+    # Seed the registry so the persona lookup finds the operator prompt.
+    gateway_core.save_gateway_registry(
+        {
+            "agents": [
+                {
+                    "name": "orion",
+                    "agent_id": "agent-orion",
+                    "space_id": "space-123",
+                    "template_id": "claude_code_channel",
+                    "runtime_type": "claude_code_channel",
+                    "token_file": str(token_file),
+                    "base_url": "https://paxai.app",
+                    "system_prompt": "You are the orion role; coordinate the demo.",
+                }
+            ]
+        }
+    )
+
+    workdir = tmp_path / "work-orion"
+    env_path = tmp_path / "orion.env"
+    result = runner.invoke(
+        channel_mod.app,
+        [
+            "setup",
+            "orion",
+            "--workdir",
+            str(workdir),
+            "--env-path",
+            str(env_path),
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+    claude_md = (workdir / "CLAUDE.md").read_text()
+    assert "BEGIN ax-gateway-agent-context" in claude_md
+    assert "END ax-gateway-agent-context" in claude_md
+    # Operator prompt lands directly in CLAUDE.md so the Claude Code session
+    # reads it on startup without an indirect AGENT_CONTEXT.md follow.
+    assert "You are the orion role; coordinate the demo." in claude_md
+    # Collaboration guidance also surfaces.
+    assert "ax send" in claude_md
+    assert "ax messages list" in claude_md
+
+
+def test_marker_section_preserves_user_content_in_claude_md(tmp_path):
+    """If a workdir already has CLAUDE.md, the marker writer prepends the
+    auto-generated section without clobbering user content."""
+    from ax_cli.commands.gateway import _render_agent_persona_markdown, _write_marker_section
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    user_content = "# User project notes\n\nDo not delete these.\n"
+    (workdir / "CLAUDE.md").write_text(user_content)
+
+    entry = {
+        "name": "demo",
+        "template_id": "claude_code_channel",
+        "runtime_type": "claude_code_channel",
+        "system_prompt": "Operator role text.",
+    }
+    _write_marker_section(
+        workdir / "CLAUDE.md", body=_render_agent_persona_markdown(entry, workdir=str(workdir))
+    )
+    final = (workdir / "CLAUDE.md").read_text()
+    # Marker section appears.
+    assert "BEGIN ax-gateway-agent-context" in final
+    assert "Operator role text." in final
+    # User content preserved.
+    assert "# User project notes" in final
+    assert "Do not delete these." in final
+
+
+def test_marker_section_replaces_in_place_on_rerun(tmp_path):
+    """Re-running setup with an updated system_prompt must replace just the
+    section between markers, not append a duplicate."""
+    from ax_cli.commands.gateway import _render_agent_persona_markdown, _write_marker_section
+
+    workdir = tmp_path / "work"
+    workdir.mkdir()
+    target = workdir / "CLAUDE.md"
+
+    entry_v1 = {
+        "name": "demo",
+        "template_id": "claude_code_channel",
+        "runtime_type": "claude_code_channel",
+        "system_prompt": "First role.",
+    }
+    _write_marker_section(target, body=_render_agent_persona_markdown(entry_v1, workdir=str(workdir)))
+
+    entry_v2 = dict(entry_v1, system_prompt="Updated role.")
+    _write_marker_section(target, body=_render_agent_persona_markdown(entry_v2, workdir=str(workdir)))
+
+    final = target.read_text()
+    assert final.count("BEGIN ax-gateway-agent-context") == 1
+    assert "Updated role." in final
+    assert "First role." not in final
+
+
 def test_channel_env_file_sets_missing_runtime_env(monkeypatch, tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -918,7 +1069,12 @@ def test_channel_setup_writes_per_agent_mcp_and_env(tmp_path):
     assert payload["agent_context_path"] == str(workdir / ".ax" / "AGENT_CONTEXT.md")
     mcp = json.loads((workdir / ".mcp.json").read_text())
     server = mcp["mcpServers"]["ax-channel"]
-    assert server["command"] == "axctl"
+    # Resolves to an absolute path so Claude Code can launch the bridge
+    # from inside the agent workdir (which has no .venv/). Either an
+    # absolute filesystem path or, on a stripped PATH, falls back to bare
+    # "axctl" (no sibling found, no PATH match).
+    cmd = server["command"]
+    assert cmd == "axctl" or Path(cmd).is_absolute(), cmd
     assert server["args"] == ["channel"]
     assert server["env"]["AX_CHANNEL_ENV_FILE"] == str(env_path)
     env_text = env_path.read_text()

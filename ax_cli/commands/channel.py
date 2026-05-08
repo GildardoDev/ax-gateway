@@ -234,19 +234,62 @@ def _write_channel_workspace_context(workdir: Path, *, agent_name: str) -> Path:
     _write_channel_context_hint(
         workdir / "AGENTS.md", agent_name=agent_name, context_path=Path(".ax") / "AGENT_CONTEXT.md"
     )
-    _write_channel_context_hint(
-        workdir / "CLAUDE.md", agent_name=agent_name, context_path=Path(".ax") / "AGENT_CONTEXT.md"
+
+    # Write the operator persona + collaboration guidance into CLAUDE.md (the
+    # file Claude Code reads automatically as project context). Look up the
+    # registry entry to get the operator's system_prompt; fall through to a
+    # stub entry if the agent isn't registered yet (channel-setup-only flow).
+    from .gateway import _render_agent_persona_markdown, _write_marker_section
+
+    entry: dict[str, Any] = {
+        "name": agent_name,
+        "template_id": "claude_code_channel",
+        "runtime_type": "claude_code_channel",
+        "workdir": str(workdir),
+    }
+    try:
+        registry = gateway_core.load_gateway_registry()
+        registry_entry = gateway_core.find_agent_entry(registry, agent_name)
+        if registry_entry:
+            entry = dict(registry_entry)
+    except Exception:  # noqa: BLE001 — channel setup must not fail on registry hiccups
+        pass
+    _write_marker_section(
+        workdir / "CLAUDE.md",
+        body=_render_agent_persona_markdown(entry, workdir=str(workdir)),
     )
     return context_path
 
 
 def _default_local_channel_command() -> str:
-    """Prefer the sibling axctl script for editable/dev installs."""
-    launcher = Path(sys.argv[0]).expanduser()
-    if launcher.name in {"ax", "axctl"}:
-        sibling = launcher.with_name("axctl")
-        if sibling.exists():
-            return str(sibling)
+    """Resolve the axctl path written into a generated `.mcp.json`.
+
+    Claude Code launches the channel server from inside the agent's workdir,
+    which is almost never the same directory the operator was in when they
+    ran `ax channel setup`. Anything relative (e.g., `.venv/bin/axctl` from a
+    cwd-anchored launcher) breaks at launch time because the agent workdir
+    has no `.venv/`. Resolve to absolute before writing it out.
+
+    Order of preference:
+
+    1. Sibling `axctl` next to the running launcher (covers editable/dev
+       installs where `ax` and `axctl` live together in `.venv/bin`).
+    2. `shutil.which("axctl")` — system PATH lookup, what a fresh shell
+       would resolve.
+    3. Bare `"axctl"` so MCP can still try PATH at launch time.
+    """
+    raw = sys.argv[0] if sys.argv else ""
+    if raw:
+        launcher = Path(raw).expanduser().resolve()
+        if launcher.name in {"ax", "axctl"}:
+            sibling = launcher.with_name("axctl")
+            if sibling.exists():
+                return str(sibling)
+    import shutil
+
+    found = shutil.which("axctl")
+    if found:
+        return str(Path(found).resolve())
     return "axctl"
 
 
