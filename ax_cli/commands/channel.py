@@ -655,7 +655,20 @@ class ChannelBridge:
                 if event.parent_id:
                     meta["parent_id"] = event.parent_id
                 if event.attachments:
-                    meta["attachments"] = event.attachments
+                    _ATTACHMENT_SAFE_KEYS = {
+                        "id",
+                        "attachment_id",
+                        "filename",
+                        "content_type",
+                        "context_key",
+                        "key",
+                        "size_bytes",
+                    }
+                    meta["attachments"] = [
+                        {k: v for k, v in att.items() if k in _ATTACHMENT_SAFE_KEYS}
+                        for att in event.attachments
+                        if isinstance(att, dict)
+                    ]
                 if isinstance(event.metadata, dict):
                     forward = event.metadata.get("forward")
                     if isinstance(forward, dict):
@@ -669,6 +682,8 @@ class ChannelBridge:
                 )
                 await self.publish_processing_status(event.message_id, "working")
                 self.log(f"delivered mention {event.message_id} from {event.author}")
+            except Exception as exc:
+                self.log(f"emit_mentions: failed to deliver {event.message_id}: {exc}")
             finally:
                 self.mention_queue.task_done()
 
@@ -1007,13 +1022,6 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                             bridge.log("SSE reconnecting to refresh JWT")
                             break
                         continue
-                    if is_update and message_id in seen_ids:
-                        bridge.log("  -> skip: update for already-delivered msg")
-                        if reconnect_after_event:
-                            bridge.log("SSE reconnecting to refresh JWT")
-                            break
-                        continue
-
                     # Skip runtime progress chatter. Two signals:
                     #   1. metadata.streaming_reply.final is explicitly false,
                     #      meaning the payload is a placeholder/progress chunk
@@ -1025,16 +1033,29 @@ def _sse_loop(bridge: ChannelBridge) -> None:
                     # final message_updated for the same id can be delivered.
                     metadata_obj = data.get("metadata") or {}
                     streaming = metadata_obj.get("streaming_reply") if isinstance(metadata_obj, dict) else None
-                    if isinstance(streaming, dict) and streaming.get("final") is False:
+                    is_non_final_stream = isinstance(streaming, dict) and streaming.get("final") is False
+                    raw_first_line = (data.get("content") or "").strip().split("\n", 1)[0].strip()
+                    stripped_first_line = _LEADING_MENTION_RE.sub("", raw_first_line, count=1).strip()
+                    is_progress = bool(_RUNTIME_PROGRESS_RE.match(stripped_first_line))
+
+                    if is_non_final_stream:
                         bridge.log("  -> skip: streaming_reply non-final")
                         if reconnect_after_event:
                             bridge.log("SSE reconnecting to refresh JWT")
                             break
                         continue
-                    raw_first_line = (data.get("content") or "").strip().split("\n", 1)[0].strip()
-                    stripped_first_line = _LEADING_MENTION_RE.sub("", raw_first_line, count=1).strip()
-                    if _RUNTIME_PROGRESS_RE.match(stripped_first_line):
+                    if is_progress:
                         bridge.log(f"  -> skip: runtime progress message ({raw_first_line!r})")
+                        if reconnect_after_event:
+                            bridge.log("SSE reconnecting to refresh JWT")
+                            break
+                        continue
+
+                    # For updates to already-delivered messages, skip. But for
+                    # updates to messages we skipped (progress chatter), the id
+                    # won't be in seen_ids, so the final content falls through.
+                    if is_update and message_id in seen_ids:
+                        bridge.log("  -> skip: update for already-delivered msg")
                         if reconnect_after_event:
                             bridge.log("SSE reconnecting to refresh JWT")
                             break

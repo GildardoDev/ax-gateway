@@ -653,6 +653,144 @@ def test_channel_notification_metadata_matches_claude_channel_contract():
     assert meta["forward"] == {"resource_type": "task", "task_id": "task-123"}
 
 
+def test_channel_notification_strips_unsafe_attachment_fields():
+    """Attachment blobs (url with base64 data) must not leak into the MCP notification."""
+
+    async def run():
+        client = FakeClient("axp_a_AgentKey.Secret")
+        bridge = CaptureBridge(client)
+        bridge.initialized.set()
+        await bridge.mention_queue.put(
+            MentionEvent(
+                message_id="incoming-img",
+                parent_id=None,
+                conversation_id=None,
+                author="alex",
+                prompt="check this image",
+                raw_content="@peer-agent check this image",
+                created_at=None,
+                space_id="space-123",
+                attachments=[
+                    {
+                        "id": "att-1",
+                        "filename": "photo.jpg",
+                        "content_type": "image/jpeg",
+                        "size_bytes": 4_000_000,
+                        "context_key": "upload:photo.jpg:att-1",
+                        "url": "data:image/jpeg;base64," + "A" * 100_000,
+                        "extra_field": "should-be-stripped",
+                    }
+                ],
+            )
+        )
+        task = asyncio.create_task(bridge.emit_mentions())
+        await asyncio.wait_for(bridge.mention_queue.join(), timeout=1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return bridge
+
+    bridge = asyncio.run(run())
+
+    meta = bridge.writes[0]["params"]["meta"]
+    att = meta["attachments"][0]
+    assert att["id"] == "att-1"
+    assert att["filename"] == "photo.jpg"
+    assert att["content_type"] == "image/jpeg"
+    assert att["size_bytes"] == 4_000_000
+    assert att["context_key"] == "upload:photo.jpg:att-1"
+    assert "url" not in att
+    assert "extra_field" not in att
+
+
+def test_channel_emit_mentions_survives_write_failure():
+    """A failed delivery must not kill the emit_mentions loop — next event still lands."""
+
+    async def run():
+        client = FakeClient("axp_a_AgentKey.Secret")
+        bridge = CaptureBridge(client)
+        bridge.initialized.set()
+
+        call_count = 0
+        original_write = bridge.write_message
+
+        async def failing_then_ok(payload):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated stdout failure")
+            await original_write(payload)
+
+        bridge.write_message = failing_then_ok
+
+        bad_event = MentionEvent(
+            message_id="will-fail",
+            parent_id=None,
+            conversation_id=None,
+            author="alex",
+            prompt="this will fail",
+            raw_content="@peer-agent this will fail",
+            created_at=None,
+            space_id="space-123",
+        )
+        good_event = MentionEvent(
+            message_id="will-succeed",
+            parent_id=None,
+            conversation_id=None,
+            author="alex",
+            prompt="this should land",
+            raw_content="@peer-agent this should land",
+            created_at=None,
+            space_id="space-123",
+        )
+        await bridge.mention_queue.put(bad_event)
+        await bridge.mention_queue.put(good_event)
+
+        task = asyncio.create_task(bridge.emit_mentions())
+        await asyncio.wait_for(bridge.mention_queue.join(), timeout=2)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return bridge
+
+    bridge = asyncio.run(run())
+
+    assert len(bridge.writes) == 1
+    assert bridge.writes[0]["params"]["content"] == "this should land"
+
+
+def test_channel_delivers_completion_update_after_progress_skip(monkeypatch):
+    """Progress message skipped → subsequent message_updated with real content must land.
+
+    Regression test for #74: previously the message_updated dedup ran before the
+    progress filter, so if a progress message was delivered (e.g., regex miss),
+    the completion update was dropped. With the fix, progress filtering runs
+    first — the progress message never enters seen_ids, so the completion
+    update for the same message id passes through.
+    """
+
+    progress = {
+        "id": "sentinel-reply-1",
+        "content": "@peer-agent Working…",
+        "author": {"id": "agent-2", "name": "frontend_sentinel", "type": "agent"},
+        "mentions": ["peer-agent"],
+    }
+    completion = {
+        "id": "sentinel-reply-1",
+        "content": "@peer-agent Here is the analysis you requested with full details.",
+        "author": {"id": "agent-2", "name": "frontend_sentinel", "type": "agent"},
+        "mentions": ["peer-agent"],
+    }
+    events = [("message", progress), ("message_updated", completion)]
+    _, _, delivered = _run_sse_loop_with_events(events, monkeypatch=monkeypatch)
+    assert [e.message_id for e in delivered] == ["sentinel-reply-1"]
+    assert "analysis you requested" in delivered[0].prompt
+
+
 def test_channel_env_file_sets_missing_runtime_env(monkeypatch, tmp_path):
     env_file = tmp_path / ".env"
     env_file.write_text(
