@@ -6772,6 +6772,40 @@ def local_connect(
         console.print(f"  expires  = {payload.get('expires_at')}")
 
 
+def _ensure_workdir(path: Path, *, create: bool, raw_input: str | None = None) -> None:
+    """Validate or provision a workdir for a folder-bound Gateway identity.
+
+    The workdir is the durable binding for a Gateway agent — one folder maps
+    to one registry row. Silently creating a directory the operator did not
+    intend is exactly the surprise this guard exists to prevent: a typo in
+    ``--workdir`` should not mint a fresh empty folder somewhere unexpected
+    and then attach an agent identity to it.
+
+    * If the path exists and is a directory, return.
+    * If the path exists but is a file, error.
+    * If the path does not exist and ``create`` is True, create it (with any
+      missing parent directories).
+    * If the path does not exist and ``create`` is False, error with an
+      actionable hint pointing at ``--create-workdir``.
+    """
+    label = raw_input if raw_input and raw_input != str(path) else str(path)
+    if path.exists():
+        if not path.is_dir():
+            raise typer.BadParameter(f"--workdir {label!r} exists but is not a directory: {path}")
+        return
+    if not create:
+        raise typer.BadParameter(
+            f"--workdir {label!r} does not exist: {path}\n"
+            "Pass --create-workdir to create it, or pick an existing folder. "
+            "One folder maps to one Gateway identity, so the workdir should be a "
+            "real workspace you intend the agent to operate in."
+        )
+    try:
+        path.mkdir(parents=True, exist_ok=False)
+    except OSError as exc:
+        raise typer.BadParameter(f"Could not create --workdir {path}: {exc}") from exc
+
+
 def _gateway_local_config_text(*, agent_name: str, gateway_url: str, workdir: str | None = None) -> str:
     lines = [
         "[gateway]",
@@ -6901,13 +6935,37 @@ def _approval_required_guidance(
 def local_init(
     agent_name: str = typer.Argument(..., help="Local Gateway agent name"),
     gateway_url: str = typer.Option("http://127.0.0.1:8765", "--url", help="Local Gateway UI/API URL"),
-    workdir: str = typer.Option(None, "--workdir", help="Workspace folder to configure; defaults to CWD"),
+    workdir: str = typer.Option(
+        None,
+        "--workdir",
+        help=(
+            "Workspace folder to configure; defaults to CWD. One folder maps to one durable "
+            "Gateway identity. The folder must already exist; pass --create-workdir to create it."
+        ),
+    ),
+    create_workdir: bool = typer.Option(
+        False,
+        "--create-workdir",
+        help=(
+            "Create the workdir (and any missing parent directories) instead of failing when "
+            "it doesn't exist. Use when you are intentionally provisioning a new workspace."
+        ),
+    ),
     connect: bool = typer.Option(True, "--connect/--no-connect", help="Immediately request Gateway approval/session"),
     force: bool = typer.Option(False, "--force", help="Overwrite an existing .ax/config.toml"),
     as_json: bool = JSON_OPTION,
 ):
-    """Write a Gateway-native local config that contains no PAT or token file."""
-    root = Path(workdir or Path.cwd()).expanduser().resolve()
+    """Write a Gateway-native local config that contains no PAT or token file.
+
+    The workdir is the durable binding for this Gateway identity: one folder
+    or container maps to exactly one registry row. By default the workdir
+    must already exist — bind to a real workspace, do not let the CLI silently
+    fabricate one. Pass ``--create-workdir`` when you are intentionally
+    provisioning a new folder for the agent.
+    """
+    raw_workdir = workdir or str(Path.cwd())
+    root = Path(raw_workdir).expanduser().resolve()
+    _ensure_workdir(root, create=create_workdir, raw_input=raw_workdir)
     ax_dir = root / ".ax"
     config_path = ax_dir / "config.toml"
     if config_path.exists() and not force:

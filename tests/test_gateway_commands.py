@@ -108,6 +108,88 @@ def test_gateway_local_init_writes_tokenless_config(monkeypatch, tmp_path):
     assert json.loads(result.output)["token_stored"] is False
 
 
+def test_gateway_local_init_rejects_missing_workdir_by_default(monkeypatch, tmp_path):
+    """Default behavior: --workdir must already exist; bail rather than silently mkdir."""
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_request_local_connect",
+        lambda **kwargs: pytest.fail("connect must not run when workdir is rejected"),
+    )
+    missing = tmp_path / "agents" / "mac_backend"
+    assert not missing.exists()
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "init", "mac_backend", "--workdir", str(missing)],
+    )
+
+    assert result.exit_code != 0
+    assert "does not exist" in result.output
+    assert "--create-workdir" in result.output
+    assert not missing.exists(), "workdir must not be created without --create-workdir"
+    assert not (missing / ".ax").exists()
+
+
+def test_gateway_local_init_with_create_workdir_provisions_directory(monkeypatch, tmp_path):
+    """`--create-workdir` opts in to making the missing folder."""
+    calls = {}
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_request_local_connect",
+        lambda **kwargs: calls.setdefault("connect", kwargs)
+        or {"status": "approved", "session_token": "tok", "agent": {"name": kwargs["agent_name"]}},
+    )
+
+    new_workdir = tmp_path / "agents" / "fresh"
+    assert not new_workdir.exists()
+
+    result = runner.invoke(
+        app,
+        [
+            "gateway",
+            "local",
+            "init",
+            "fresh",
+            "--workdir",
+            str(new_workdir),
+            "--create-workdir",
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert new_workdir.is_dir()
+    assert (new_workdir / ".ax" / "config.toml").exists()
+
+
+def test_gateway_local_init_rejects_workdir_pointing_at_a_file(monkeypatch, tmp_path):
+    """If --workdir resolves to an existing file, fail with a clear error."""
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_request_local_connect",
+        lambda **kwargs: pytest.fail("connect must not run when workdir is invalid"),
+    )
+    file_path = tmp_path / "not-a-dir.txt"
+    file_path.write_text("nope")
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "init", "x", "--workdir", str(file_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "not a directory" in result.output
+
+
+def test_ensure_workdir_helper_no_create_when_exists(tmp_path):
+    """The helper is a no-op when the workdir already exists as a directory."""
+    existing = tmp_path / "already_here"
+    existing.mkdir()
+    # Should not raise; should not modify anything observable.
+    gateway_cmd._ensure_workdir(existing, create=False)
+    assert existing.is_dir()
+
+
 def test_existing_agent_home_space_prefers_backend_default_space():
     class FakeClient:
         def list_agents(self):
