@@ -179,6 +179,8 @@ def _polish_metadata(
 
     Skipped silently when nothing to update — this path isn't mandatory.
     """
+    from .agents import _warn_if_fields_dropped
+
     fields: dict = {}
     if bio is not None:
         fields["bio"] = bio
@@ -188,7 +190,8 @@ def _polish_metadata(
         fields["system_prompt"] = system_prompt
     if not fields:
         return
-    client.update_agent(name, **fields)
+    data = client.update_agent(name, **fields)
+    _warn_if_fields_dropped(fields, data)
 
 
 def _mint_agent_pat(
