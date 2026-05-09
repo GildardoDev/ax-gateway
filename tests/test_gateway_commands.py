@@ -1346,6 +1346,116 @@ def test_gateway_local_connect_rejects_second_identity_from_same_origin(monkeypa
         gateway_cmd._connect_local_pass_through_agent(agent_name="frontend_sentinel", fingerprint=changed_name)
 
 
+def test_gateway_local_connect_allows_existing_agent_to_reconnect_when_workdir_is_shared(
+    monkeypatch, tmp_path
+):
+    """Multi-tenant case: cli_god and pulse-cc legitimately share a workdir.
+
+    If pulse-cc was registered first and cli_god's row also exists, cli_god
+    re-connecting from the same physical workdir must NOT be rejected as a
+    fingerprint collision — the operator has already approved both identities.
+
+    Regression guard for aX task b4ecca83.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "jacob",
+        }
+    )
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: _FakeUserClient())
+    monkeypatch.setattr(gateway_cmd, "_hydrate_entry_space_from_database", lambda *a, **k: None)
+
+    shared_fingerprint = {
+        "pid": 999999,
+        "parent_pid": 1,
+        "cwd": str(tmp_path),
+        "exe_path": sys.executable,
+        "user": "jacob",
+    }
+    pulse_fingerprint = {**shared_fingerprint, "agent_name": "pulse-cc"}
+    cli_god_fingerprint = {**shared_fingerprint, "agent_name": "cli_god"}
+
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "pulse-cc",
+            "agent_id": "agent-pulse",
+            "space_id": "space-1",
+            "template_id": "pass_through",
+            "runtime_type": "inbox",
+            "approval_state": "approved",
+            "attestation_state": "verified",
+            "local_fingerprint": pulse_fingerprint,
+        },
+        {
+            "name": "cli_god",
+            "agent_id": "agent-cli-god",
+            "space_id": "space-1",
+            "template_id": "pass_through",
+            "runtime_type": "inbox",
+            "approval_state": "approved",
+            "attestation_state": "verified",
+            "local_fingerprint": cli_god_fingerprint,
+        },
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    # cli_god re-connects from the same workdir pulse-cc also uses.
+    # Before the fix this raised ValueError("Gateway identity mismatch: ...
+    # already registered as @pulse-cc"); now it should succeed because
+    # cli_god's own registry row is found by name first, before the
+    # collision check runs.
+    result = gateway_cmd._connect_local_pass_through_agent(
+        agent_name="cli_god", fingerprint=cli_god_fingerprint
+    )
+    assert result["agent"]["name"] == "cli_god"
+    assert result["agent"]["agent_id"] == "agent-cli-god"
+
+
+def test_gateway_local_connect_still_blocks_fresh_name_when_workdir_is_owned(monkeypatch, tmp_path):
+    """The fresh-name protection must still fire when registering a brand-new
+    agent at a workdir already owned by a different agent.
+
+    This is the same shape as the existing
+    ``rejects_second_identity_from_same_origin`` test but explicitly framed as
+    the "after the fix, the protection still exists" guard so a future
+    refactor can't quietly silence it.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    fingerprint = {
+        "agent_name": "owner",
+        "pid": 999999,
+        "parent_pid": 1,
+        "cwd": str(tmp_path),
+        "exe_path": sys.executable,
+        "user": "anyone",
+    }
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "owner",
+            "agent_id": "agent-owner",
+            "space_id": "space-1",
+            "template_id": "pass_through",
+            "runtime_type": "inbox",
+            "local_fingerprint": dict(fingerprint),
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    fresh_attempt = {**fingerprint, "agent_name": "newbie"}
+    with pytest.raises(ValueError, match="already registered as @owner"):
+        gateway_cmd._connect_local_pass_through_agent(
+            agent_name="newbie", fingerprint=fresh_attempt
+        )
+
+
 def test_find_agent_entry_by_ref_matches_row_and_stable_prefix():
     registry = {
         "agents": [

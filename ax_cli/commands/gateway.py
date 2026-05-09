@@ -451,6 +451,22 @@ def _connect_local_pass_through_agent(
         )
         raise ValueError("fingerprint_mismatch")
 
+    # Look up the requested agent by name FIRST. If it already exists in the
+    # registry, the operator has previously approved this identity at this
+    # workdir (or anywhere) and is just (re-)connecting. Multi-tenant case:
+    # cli_god and pulse-cc can both legitimately operate from the same
+    # physical workdir, each with its own registry row. Running the
+    # collision check before the by-name lookup would have rejected
+    # cli_god's reconnect just because pulse-cc's row also fingerprints
+    # this directory.
+    if entry is None:
+        entry = find_agent_entry(registry, normalized_name)
+
+    # Collision check only runs when the requested name is genuinely new
+    # (no existing registry row). This still protects against accidental
+    # duplicate registrations — registering a fresh agent at a workdir
+    # already owned by a different agent surfaces the explicit error so
+    # the operator can decide how to proceed.
     if entry is None:
         collision = _find_local_origin_collision(
             registry,
@@ -463,11 +479,10 @@ def _connect_local_pass_through_agent(
                 "Gateway identity mismatch: "
                 f"this local origin is already registered as @{existing_name}. "
                 "Use that repo-local .ax/config.toml identity, reconnect by registry ref, "
-                "or remove/rename the existing registry row before requesting a new agent name."
+                "or remove/rename the existing registry row before requesting a new agent name. "
+                "If multiple agents legitimately share this workdir, register the new agent "
+                "from a different working directory first, then it can re-connect from here."
             )
-
-    if entry is None:
-        entry = find_agent_entry(registry, normalized_name)
     if entry is None:
         if not auto_create:
             raise LookupError(f"Managed agent not found: {normalized_name}")
