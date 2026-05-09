@@ -26,6 +26,30 @@ from .handoff import _wait_for_handoff_reply
 # rejected as a 500, so the CLI fails fast with a helpful message instead.
 AVATAR_URL_MAX_LENGTH = 512
 
+_ISSUE_76_URL = "https://github.com/ax-platform/ax-gateway/issues/76"
+
+_VERIFIABLE_FIELDS: dict[str, str] = {
+    "bio": "--bio",
+    "specialization": "--specialization",
+}
+
+
+def _warn_if_fields_dropped(sent: dict[str, Any], response: dict[str, Any]) -> list[str]:
+    """Compare sent fields against the server response and warn on silent drops.
+
+    Returns the list of flag names that were sent but not confirmed.
+    """
+    dropped = [flag for key, flag in _VERIFIABLE_FIELDS.items() if key in sent and response.get(key) != sent[key]]
+    if dropped:
+        flags = ", ".join(dropped)
+        err_console.print(
+            f"[yellow]Warning:[/yellow] {flags} accepted (HTTP 200) but not "
+            f"confirmed in server response.\n"
+            f"  These fields may not be supported by your current backend version.\n"
+            f"  See: {_ISSUE_76_URL}",
+        )
+    return dropped
+
 
 def _effective_config_line() -> str:
     """One-liner describing the resolved environment, for mutating commands.
@@ -737,6 +761,7 @@ def update_agent(
         data = client.update_agent(identifier, **fields)
     except httpx.HTTPStatusError as e:
         handle_error(e)
+    _warn_if_fields_dropped(fields, data)
     if as_json:
         print_json(data)
     else:
