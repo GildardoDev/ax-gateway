@@ -81,6 +81,7 @@ from ..gateway import (
     load_recent_gateway_activity,
     load_space_cache,
     looks_like_space_uuid,
+    lookup_space_in_cache,
     ollama_setup_status,
     record_gateway_activity,
     remove_agent_entry,
@@ -932,6 +933,42 @@ def _local_session_inbox(
         ),
         "session": session,
     }
+
+
+def _resolve_space_via_cache(value: str | None) -> str | None:
+    """Cache-only space resolver for the pass-through (`local_*`) commands.
+
+    Pass-through agents must not need the user PAT, so we cannot fall back
+    to a fresh `client.list_spaces()` here — that would defeat the trust
+    boundary. The on-disk space cache (populated by any prior user-side
+    Gateway command) is the authoritative source on the agent side.
+
+    Returns the canonical UUID for a slug or name when found, the original
+    UUID-like input verbatim, or ``None`` if neither (caller decides whether
+    to error or pass through).
+
+    This intentionally diverges from `config.resolve_space_id()`, which
+    requires an authoring client and falls back to upstream `list_spaces`.
+    """
+    if not value:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    # UUID-like passes through unchanged.
+    try:
+        from uuid import UUID
+
+        UUID(raw)
+        return raw
+    except ValueError:
+        pass
+    cached = lookup_space_in_cache(raw)
+    if cached:
+        sid = str(cached.get("id") or cached.get("space_id") or "").strip()
+        if sid:
+            return sid
+    return None
 
 
 def _normalize_runtime_type(runtime_type: str) -> str:
@@ -7531,7 +7568,13 @@ def local_send(
         None, "--session-token", envvar="AX_GATEWAY_SESSION", help="Gateway session token"
     ),
     content: str = typer.Argument(..., help="Message content"),
-    space_id: str = typer.Option(None, "--space-id", help="Space to send into"),
+    space_id: str = typer.Option(
+        None,
+        "--space",
+        "--space-id",
+        "-s",
+        help="Space to send into. Accepts a slug, name, or UUID; slug/name resolves through the local space cache.",
+    ),
     agent_name: str = typer.Option(
         None, "--agent", "--name", help="Approved local pass-through agent to connect as if no session token is set"
     ),
@@ -7565,7 +7608,20 @@ def local_send(
     ),
     as_json: bool = JSON_OPTION,
 ):
-    """Send through an approved local pass-through Gateway session."""
+    """Send through an approved local pass-through Gateway session.
+
+    The ``--space`` option accepts a slug, name, or UUID. Slugs and names
+    resolve through the local space cache so pass-through agents do not
+    need a user PAT just to translate a friendly name into a UUID.
+    """
+    if space_id:
+        resolved = _resolve_space_via_cache(space_id)
+        if resolved is None:
+            raise typer.BadParameter(
+                f"Could not resolve space '{space_id}' from the local space cache. "
+                "Pass a UUID, or run `ax spaces list` once from the user side to populate the cache."
+            )
+        space_id = resolved
     try:
         resolved_session_token, connect_payload = _resolve_local_gateway_session(
             session_token=session_token,
@@ -7673,7 +7729,13 @@ def local_inbox(
     ),
     limit: int = typer.Option(20, "--limit", min=1, max=100, help="Max messages to return"),
     channel: str = typer.Option("main", "--channel", help="Message channel"),
-    space_id: str = typer.Option(None, "--space-id", help="Space to poll"),
+    space_id: str = typer.Option(
+        None,
+        "--space",
+        "--space-id",
+        "-s",
+        help="Space to poll. Accepts a slug, name, or UUID; slug/name resolves through the local space cache.",
+    ),
     agent_name: str = typer.Option(
         None, "--agent", "--name", help="Approved local pass-through agent to connect as if no session token is set"
     ),
@@ -7702,7 +7764,20 @@ def local_inbox(
     gateway_url: str = typer.Option("http://127.0.0.1:8765", "--url", help="Local Gateway UI/API URL"),
     as_json: bool = JSON_OPTION,
 ):
-    """Poll an approved local pass-through Gateway inbox."""
+    """Poll an approved local pass-through Gateway inbox.
+
+    The ``--space`` option accepts a slug, name, or UUID. Slugs and names
+    resolve through the local space cache; pass-through agents do not need
+    a user PAT for the lookup.
+    """
+    if space_id:
+        resolved = _resolve_space_via_cache(space_id)
+        if resolved is None:
+            raise typer.BadParameter(
+                f"Could not resolve space '{space_id}' from the local space cache. "
+                "Pass a UUID, or run `ax spaces list` once from the user side to populate the cache."
+            )
+        space_id = resolved
     try:
         resolved_session_token, connect_payload = _resolve_local_gateway_session(
             session_token=session_token,
@@ -7770,7 +7845,13 @@ def add_agent(
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),
     ollama_model: str = typer.Option(None, "--ollama-model", help="Ollama model override for the Ollama template"),
-    space_id: str = typer.Option(None, "--space-id", help="Target space (defaults to gateway session)"),
+    space_id: str = typer.Option(
+        None,
+        "--space",
+        "--space-id",
+        "-s",
+        help="Target space (defaults to gateway session). Accepts a slug, name, or UUID.",
+    ),
     audience: str = typer.Option("both", "--audience", help="Minted PAT audience"),
     description: str = typer.Option(None, "--description", help="Create/update description"),
     model: str = typer.Option(None, "--model", help="Create/update model"),
@@ -7790,7 +7871,25 @@ def add_agent(
     start: bool = typer.Option(True, "--start/--no-start", help="Desired running state after registration"),
     as_json: bool = JSON_OPTION,
 ):
-    """Register a managed agent and mint a Gateway-owned PAT for it."""
+    """Register a managed agent and mint a Gateway-owned PAT for it.
+
+    The ``--space`` option accepts a slug, name, or UUID. Slug/name resolution
+    runs through the local space cache first; if that misses, the resolution
+    falls through to the gateway user client's ``list_spaces`` lookup.
+    """
+    if space_id:
+        cached = _resolve_space_via_cache(space_id)
+        if cached is not None:
+            space_id = cached
+        else:
+            try:
+                client = _load_gateway_user_client()
+                space_id = resolve_space_id(client, explicit=space_id)
+            except (typer.Exit, typer.BadParameter):
+                raise
+            except Exception as exc:
+                err_console.print(f"[red]Could not resolve space '{space_id}': {exc}[/red]")
+                raise typer.Exit(1)
     selected_template = template_id or ("echo_test" if not runtime_type else None)
     try:
         resolved_prompt = _resolve_system_prompt_input(
@@ -8123,7 +8222,13 @@ def inbox_for_agent(
     name: str = typer.Argument(..., help="Managed agent name"),
     limit: int = typer.Option(20, "--limit", min=1, max=200, help="Max messages to return"),
     channel: str = typer.Option("main", "--channel", help="Message channel"),
-    space_id: str = typer.Option(None, "--space-id", help="Override the agent's home space"),
+    space_id: str = typer.Option(
+        None,
+        "--space",
+        "--space-id",
+        "-s",
+        help="Override the agent's home space. Accepts a slug, name, or UUID.",
+    ),
     unread_only: bool = typer.Option(
         False,
         "--unread-only/--all",
@@ -8145,7 +8250,20 @@ def inbox_for_agent(
     agents — uses the agent's Gateway-loaded credentials, so no PAT is exposed
     to the caller. Pairs with `ax gateway agents send` for a uniform read/write
     surface from any operator seat without needing the channel MCP attached.
+
+    The ``--space`` option accepts a slug, name, or UUID. Slugs and names
+    resolve through the local space cache; the operator's user PAT is not
+    required for this lookup.
     """
+    if space_id:
+        resolved = _resolve_space_via_cache(space_id)
+        if resolved is None:
+            err_console.print(
+                f"[red]Could not resolve space '{space_id}' from the local space cache. "
+                "Pass a UUID, or run `ax spaces list` once to populate the cache.[/red]"
+            )
+            raise typer.Exit(1)
+        space_id = resolved
     try:
         result = _inbox_for_managed_agent(
             name=name,
