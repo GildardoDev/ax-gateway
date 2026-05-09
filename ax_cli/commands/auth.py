@@ -718,6 +718,67 @@ def init(
         console.print("[yellow]Reminder:[/yellow] Add .ax/ to .gitignore")
 
 
+@app.command("refresh")
+def refresh(
+    as_json: bool = JSON_OPTION,
+):
+    """Drop the cached JWT and mint a fresh one from the saved PAT.
+
+    Use this after an out-of-band change to your account that the cached
+    JWT cannot reflect — most commonly joining a new space through the
+    web UI. Without a refresh, the CLI continues to use the cached JWT
+    until it naturally expires, so commands like ``ax spaces list`` may
+    not show the newly-joined space until the next call after expiry.
+
+    The PAT stays put; only the cached short-lived JWT is replaced.
+    """
+    token = resolve_token()
+    if not token:
+        console.print(
+            "[red]No token configured.[/red] For Gateway-managed agents, use "
+            "`ax gateway local ... --workdir <path>` so Gateway can broker the "
+            "agent identity. For user setup, log into Gateway with `ax gateway login`."
+        )
+        raise typer.Exit(1)
+    if not token.startswith("axp_"):
+        console.print("[red]Token is not a PAT (must start with axp_).[/red]")
+        raise typer.Exit(1)
+
+    from ..config import resolve_base_url
+    from ..token_cache import TokenExchanger
+
+    base_url = resolve_base_url()
+    exchanger = TokenExchanger(base_url, token)
+    invalidated = exchanger.invalidate()
+
+    # Determine token class from the saved PAT class (axp_u_ vs axp_a_).
+    token_class = "agent_access" if token.startswith("axp_a_") else "user_access"
+    agent_id = None
+    if token_class == "agent_access":
+        cfg = _load_config(local=True) or _load_config(local=False) or {}
+        agent_id = cfg.get("agent_id")
+
+    try:
+        exchanger.get_token(token_class, agent_id=agent_id, force_refresh=True)
+    except httpx.HTTPStatusError as e:
+        handle_error(e)
+
+    result = {
+        "ok": True,
+        "token_class": token_class,
+        "invalidated_entries": invalidated,
+        "host": base_url,
+    }
+    if as_json:
+        print_json(result)
+        return
+    console.print(f"[green]Refreshed:[/green] {token_class} JWT against {base_url}")
+    if invalidated:
+        console.print(f"[dim]Dropped {invalidated} cached entry/entries before re-exchange.[/dim]")
+    else:
+        console.print("[dim]No cached entries existed; minted a fresh JWT.[/dim]")
+
+
 @app.command("exchange")
 def exchange(
     token_class: str = typer.Option(

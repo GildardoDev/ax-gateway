@@ -418,3 +418,113 @@ def test_auth_token_show_without_token_points_agents_to_gateway(monkeypatch, con
     assert "ax gateway local" in result.output
     assert "ax gateway login" in result.output
     assert "AX_TOKEN" not in result.output
+
+
+# --- ax auth refresh --------------------------------------------------------
+
+
+class _FakeExchanger:
+    """Stand-in for TokenExchanger that records calls without hitting the API."""
+
+    def __init__(self, base_url, pat):
+        self.base_url = base_url
+        self.pat = pat
+        self.invalidated = False
+        self.last_get_token = None
+        self.invalidated_count = 3
+
+    def invalidate(self):
+        self.invalidated = True
+        return self.invalidated_count
+
+    def get_token(self, token_class, *, agent_id=None, force_refresh=False, **_):
+        self.last_get_token = {
+            "token_class": token_class,
+            "agent_id": agent_id,
+            "force_refresh": force_refresh,
+        }
+        return "jwt.fake.token"
+
+
+def _patch_exchanger_factory(monkeypatch, factory_holder):
+    """Patch the in-function `from ..token_cache import TokenExchanger` import."""
+    import ax_cli.token_cache as token_cache_module
+
+    monkeypatch.setattr(token_cache_module, "TokenExchanger", factory_holder)
+
+
+def test_auth_refresh_invalidates_then_re_exchanges_user_pat(monkeypatch):
+    seen = {}
+
+    def factory(base_url, pat):
+        ex = _FakeExchanger(base_url, pat)
+        seen["exchanger"] = ex
+        return ex
+
+    monkeypatch.setattr("ax_cli.commands.auth.resolve_token", lambda: "axp_u_keyid.secret")
+    monkeypatch.setattr("ax_cli.config.resolve_base_url", lambda: "https://next.paxai.app")
+    _patch_exchanger_factory(monkeypatch, factory)
+
+    result = runner.invoke(app, ["auth", "refresh", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["token_class"] == "user_access"
+    assert payload["invalidated_entries"] == 3
+    assert payload["host"] == "https://next.paxai.app"
+
+    ex = seen["exchanger"]
+    assert ex.invalidated is True
+    assert ex.last_get_token == {
+        "token_class": "user_access",
+        "agent_id": None,
+        "force_refresh": True,
+    }
+
+
+def test_auth_refresh_uses_agent_access_for_agent_pat(monkeypatch):
+    seen = {}
+
+    def factory(base_url, pat):
+        ex = _FakeExchanger(base_url, pat)
+        seen["exchanger"] = ex
+        return ex
+
+    monkeypatch.setattr("ax_cli.commands.auth.resolve_token", lambda: "axp_a_keyid.secret")
+    monkeypatch.setattr("ax_cli.config.resolve_base_url", lambda: "https://next.paxai.app")
+    monkeypatch.setattr("ax_cli.commands.auth._load_config", lambda local=False: {"agent_id": "agent-7"})
+    _patch_exchanger_factory(monkeypatch, factory)
+
+    result = runner.invoke(app, ["auth", "refresh", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["token_class"] == "agent_access"
+
+    ex = seen["exchanger"]
+    assert ex.last_get_token == {
+        "token_class": "agent_access",
+        "agent_id": "agent-7",
+        "force_refresh": True,
+    }
+
+
+def test_auth_refresh_without_token_points_agents_to_gateway(monkeypatch):
+    monkeypatch.setattr("ax_cli.commands.auth.resolve_token", lambda: None)
+
+    result = runner.invoke(app, ["auth", "refresh"])
+
+    assert result.exit_code == 1
+    assert "No token configured" in result.output
+    assert "ax gateway login" in result.output
+    assert "AX_TOKEN" not in result.output
+
+
+def test_auth_refresh_rejects_non_pat_token(monkeypatch):
+    monkeypatch.setattr("ax_cli.commands.auth.resolve_token", lambda: "not-a-pat")
+
+    result = runner.invoke(app, ["auth", "refresh"])
+
+    assert result.exit_code == 1
+    assert "must start with axp_" in result.output

@@ -235,6 +235,67 @@ class TestTokenExchanger:
         mode = cache_file.stat().st_mode & 0o777
         assert mode == 0o600
 
+    def test_invalidate_drops_in_memory_and_disk_entries(
+        self, tmp_path, monkeypatch, sample_pat, mock_exchange
+    ):
+        """invalidate() removes every cached JWT minted from the same PAT."""
+        mock_post = mock_exchange()
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".ax").mkdir()
+        (tmp_path / ".ax" / "config.toml").write_text("")
+
+        exchanger = TokenExchanger("https://example.com", sample_pat)
+        exchanger.get_token("user_access", scope="messages")
+        exchanger.get_token("user_access", scope="agents spaces")
+        cache_file = tmp_path / ".ax" / "cache" / "tokens.json"
+        assert cache_file.exists()
+
+        removed = exchanger.invalidate()
+        assert removed == 2
+        # In-memory cache cleared.
+        assert exchanger._cache == {}
+
+        # Disk entries for this PAT removed (file may still exist with empty
+        # content if it was created, but no entries should remain for this PAT).
+        if cache_file.exists():
+            import json as _json
+
+            on_disk = _json.loads(cache_file.read_text() or "{}")
+            for entry in on_disk.values():
+                assert entry.get("pat_key_id") != exchanger.pat_key_id
+
+        # Next get_token re-exchanges instead of returning a cached value.
+        prior_calls = mock_post.call_count
+        exchanger.get_token("user_access", scope="messages")
+        assert mock_post.call_count == prior_calls + 1
+
+    def test_invalidate_keeps_other_pats_entries(
+        self, tmp_path, monkeypatch, mock_exchange
+    ):
+        """invalidate() must not drop entries belonging to other PATs."""
+        mock_exchange()
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".ax").mkdir()
+        (tmp_path / ".ax" / "config.toml").write_text("")
+
+        pat_a = "axp_u_KeyAlpha.SecretA"
+        pat_b = "axp_u_KeyBeta.SecretB"
+        TokenExchanger("https://example.com", pat_a).get_token("user_access")
+        TokenExchanger("https://example.com", pat_b).get_token("user_access")
+
+        cache_file = tmp_path / ".ax" / "cache" / "tokens.json"
+        import json as _json
+
+        before = _json.loads(cache_file.read_text())
+        assert {entry["pat_key_id"] for entry in before.values()} == {"KeyAlpha", "KeyBeta"}
+
+        TokenExchanger("https://example.com", pat_a).invalidate()
+
+        after = _json.loads(cache_file.read_text())
+        # KeyAlpha entries gone, KeyBeta entries preserved.
+        remaining_pats = {entry["pat_key_id"] for entry in after.values()}
+        assert remaining_pats == {"KeyBeta"}
+
     def test_disk_cache_loads_on_windows_despite_loose_mode(
         self, tmp_path, monkeypatch, sample_pat, mock_exchange
     ):

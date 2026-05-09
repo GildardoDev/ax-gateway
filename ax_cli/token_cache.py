@@ -135,6 +135,35 @@ class TokenExchanger:
         cache_file.write_text(json.dumps(pruned))
         cache_file.chmod(0o600)
 
+    def invalidate(self) -> int:
+        """Drop every cached JWT minted from this PAT.
+
+        Returns the number of entries removed. Use this when an out-of-band
+        change (joining a new space via the web UI, a bound-agent membership
+        update, role change, etc.) has shifted the user's claims so that any
+        cached JWT no longer reflects current server state. The next
+        ``get_token`` call will re-exchange the PAT for a fresh JWT.
+        """
+        if not self.pat_key_id:
+            return 0
+        # Drop in-memory entries for this PAT.
+        removed = len(self._cache)
+        self._cache = {}
+        # Rewrite disk cache without entries for this PAT (keep other PATs).
+        cache_file = self._cache_dir / "tokens.json"
+        if cache_file.exists():
+            try:
+                existing = json.loads(cache_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                existing = {}
+            kept = {k: v for k, v in existing.items() if isinstance(v, dict) and v.get("pat_key_id") != self.pat_key_id}
+            cache_file.write_text(json.dumps(kept))
+            try:
+                cache_file.chmod(0o600)
+            except OSError:
+                pass
+        return removed
+
     def get_token(
         self,
         token_class: str = "user_access",
