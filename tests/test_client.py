@@ -417,6 +417,43 @@ class TestCredentialManagement:
         assert body["agent_scope"] == "agents"
         assert body["allowed_agent_ids"] == ["agent-123"]
 
+    def test_create_key_with_bound_agent_id(self):
+        client = AxClient("https://example.com", "axp_u_UserKey.UserSecret")
+        response = httpx.Response(
+            201,
+            json={"credential_id": "cred-1", "token": "axp_a_…"},
+            request=httpx.Request("POST", "https://example.com/api/v1/keys"),
+        )
+        client._http.post = MagicMock(return_value=response)
+
+        client.create_key("bound-key", bound_agent_id="a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11")
+
+        body = client._http.post.call_args.kwargs["json"]
+        assert body["name"] == "bound-key"
+        assert body["bound_agent_id"] == "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+        assert "agent_scope" not in body
+
+    def test_create_key_with_bound_agent_id_and_scope(self):
+        client = AxClient("https://example.com", "axp_u_UserKey.UserSecret")
+        response = httpx.Response(
+            201,
+            json={},
+            request=httpx.Request("POST", "https://example.com/api/v1/keys"),
+        )
+        client._http.post = MagicMock(return_value=response)
+
+        agent_uuid = "b1eebc99-9c0b-4ef8-bb6d-6bb9bd380a22"
+        client.create_key(
+            "combo",
+            allowed_agent_ids=[agent_uuid],
+            bound_agent_id=agent_uuid,
+        )
+
+        body = client._http.post.call_args.kwargs["json"]
+        assert body["agent_scope"] == "agents"
+        assert body["allowed_agent_ids"] == [agent_uuid]
+        assert body["bound_agent_id"] == agent_uuid
+
     def test_create_task_sends_assignee_id_in_body(self):
         client = AxClient("https://example.com", "legacy-token", agent_id="creator-agent")
         response = httpx.Response(
