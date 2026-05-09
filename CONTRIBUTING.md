@@ -3,6 +3,14 @@
 Thanks for improving `axctl`. This repository is public-facing, so changes
 should be easy for operators to understand, test, and release.
 
+## Contributor License Agreement (CLA)
+
+Before we can accept your first pull request, you must sign our
+[Contributor License Agreement](CLA.md). This is handled automatically by the
+CLA Assistant bot on GitHub. When you open your first PR, you will receive a
+comment with a link to sign the CLA. You only need to sign once. Without a
+signed CLA, the PR cannot be merged.
+
 ## Development Setup
 
 ```bash
@@ -20,9 +28,9 @@ local development.
 
 ## Branches
 
-- `dev/staging` is the fast integration branch.
-- `main` is the public release branch.
-- Promotion to `main` should happen through a reviewed PR.
+- `main` is the integration and release branch. Branch off `main` for all work.
+- `dev/staging` is dormant and should not be used as a base branch.
+- All changes reach `main` through a reviewed PR.
 
 ## Commit Style
 
@@ -54,8 +62,8 @@ See [docs/release-process.md](docs/release-process.md).
 
 The short version:
 
-1. Land work in `dev/staging`.
-2. Promote `dev/staging` to `main`.
+1. Branch off `main` and open a PR.
+2. Merge to `main` after review and CI pass.
 3. Release Please opens a release PR.
 4. Merge the release PR after reviewing the version and changelog.
 5. GitHub Release publication triggers PyPI publishing.
