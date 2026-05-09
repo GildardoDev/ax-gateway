@@ -133,6 +133,142 @@ def test_existing_agent_home_space_prefers_backend_current_space():
     )
 
 
+def _seed_local_session_for_challenge(tmp_path, monkeypatch):
+    """Set up a minimal approved managed agent + active local session."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "operator",
+        }
+    )
+    token_file = tmp_path / "challenge-agent.token"
+    token_file.write_text("axp_a_test.secret")
+    entry = {
+        "name": "challenge-agent",
+        "agent_id": "agent-challenge",
+        "space_id": "space-1",
+        "base_url": "https://paxai.app",
+        "token_file": str(token_file),
+        "approval_state": "approved",
+        "attestation_state": "verified",
+    }
+    registry = {"agents": [entry]}
+    session_payload = gateway_core.issue_local_session(registry, entry)
+    registry = {"agents": [entry], "local_sessions": registry["local_sessions"]}
+    gateway_core.save_gateway_registry(registry)
+
+    class _SilentSendClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def send_message(self, space_id, content, **_kwargs):
+            return {"message": {"id": "msg-sent-1", "space_id": space_id, "content": content}}
+
+    monkeypatch.setattr(gateway_cmd, "AxClient", _SilentSendClient)
+    monkeypatch.setattr(gateway_cmd, "_load_managed_agent_client", lambda entry: _SilentSendClient())
+    return session_payload["session_token"]
+
+
+def test_session_challenge_disabled_by_default(monkeypatch, tmp_path):
+    """Flag off → send returns normal payload, no challenge surface."""
+    monkeypatch.delenv("AX_GATEWAY_SESSION_CHALLENGE", raising=False)
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    payload = gateway_cmd._send_local_session_message(
+        session_token=token,
+        body={"content": "hello", "space_id": "space-1"},
+    )
+
+    assert payload["agent"] == "challenge-agent"
+    assert "next_session_proof" not in payload
+    # Registry session record stays clean — no challenge state written.
+    record = gateway_cmd._find_local_session_record(
+        gateway_core.load_gateway_registry(), payload["session"]["session_id"]
+    )
+    assert "challenge_code" not in record
+
+
+def test_session_challenge_first_send_issues_code_and_rejects(monkeypatch, tmp_path):
+    """Flag on, no proof → raise with structured `session_challenge_required: <code>`
+    and persist the code on the session record so the next send can verify."""
+    monkeypatch.setenv("AX_GATEWAY_SESSION_CHALLENGE", "1")
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    with pytest.raises(ValueError) as excinfo:
+        gateway_cmd._send_local_session_message(
+            session_token=token,
+            body={"content": "hello", "space_id": "space-1"},
+        )
+    msg = str(excinfo.value)
+    assert msg.startswith("session_challenge_required:")
+    # Code from the message ("session_challenge_required: ABCD. ...").
+    issued_code = msg.split(":", 1)[1].strip().split(".", 1)[0].strip()
+    assert issued_code, "challenge code must appear in the error"
+    # Stored on the session record for the next send to verify against.
+    registry_after = gateway_core.load_gateway_registry()
+    record = registry_after["local_sessions"][0]
+    assert record["challenge_code"] == issued_code
+    assert "challenge_issued_at" in record
+
+
+def test_session_challenge_valid_proof_rotates_and_returns_next_code(monkeypatch, tmp_path):
+    """Flag on, second send with the matching proof → succeeds, response carries
+    a fresh `next_session_proof` so the caller can present it on the next send."""
+    monkeypatch.setenv("AX_GATEWAY_SESSION_CHALLENGE", "1")
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    # First call issues the challenge.
+    with pytest.raises(ValueError) as first:
+        gateway_cmd._send_local_session_message(
+            session_token=token, body={"content": "first", "space_id": "space-1"}
+        )
+    issued = str(first.value).split(":", 1)[1].strip().split(".", 1)[0].strip()
+
+    # Second call with the matching proof succeeds and rotates.
+    payload = gateway_cmd._send_local_session_message(
+        session_token=token,
+        body={"content": "second", "space_id": "space-1", "session_proof": issued},
+    )
+    assert payload["agent"] == "challenge-agent"
+    next_code = payload["next_session_proof"]
+    assert next_code, "rotated challenge code missing from response"
+    assert next_code != issued, "code must rotate on every successful send"
+
+    # Stored code matches the rotated one.
+    record = gateway_core.load_gateway_registry()["local_sessions"][0]
+    assert record["challenge_code"] == next_code
+
+
+def test_session_challenge_wrong_proof_rejected(monkeypatch, tmp_path):
+    """Flag on, mismatched proof → structured `invalid_session_proof: expected <code>`."""
+    monkeypatch.setenv("AX_GATEWAY_SESSION_CHALLENGE", "1")
+    token = _seed_local_session_for_challenge(tmp_path, monkeypatch)
+
+    # Issue a challenge first.
+    with pytest.raises(ValueError) as first:
+        gateway_cmd._send_local_session_message(
+            session_token=token, body={"content": "first", "space_id": "space-1"}
+        )
+    issued = str(first.value).split(":", 1)[1].strip().split(".", 1)[0].strip()
+
+    with pytest.raises(ValueError) as wrong:
+        gateway_cmd._send_local_session_message(
+            session_token=token,
+            body={"content": "second", "space_id": "space-1", "session_proof": "WRONG-CODE"},
+        )
+    msg = str(wrong.value)
+    assert msg.startswith("invalid_session_proof:")
+    assert issued in msg, "error must surface the expected code so the operator can recover"
+    # The stored code must NOT have rotated — a wrong proof doesn't burn the
+    # current challenge.
+    record = gateway_core.load_gateway_registry()["local_sessions"][0]
+    assert record["challenge_code"] == issued
+
+
 def test_local_session_send_hydrates_space_from_database(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))

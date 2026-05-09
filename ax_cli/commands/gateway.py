@@ -5,6 +5,7 @@ from __future__ import annotations
 import getpass
 import json
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -543,6 +544,101 @@ def _connect_local_pass_through_agent(
     return payload
 
 
+def _gateway_session_challenge_enabled() -> bool:
+    """Phase-1 opt-in flag for the pass-through session challenge.
+
+    Closes aX task ``68cb4d29`` (Phase-1: ``/local/send`` only). Truthy values
+    on ``AX_GATEWAY_SESSION_CHALLENGE`` enable the challenge cycle. Anything
+    else — including an unset env var — preserves the current easy path so
+    operators who haven't opted in see no behavior change.
+
+    The challenge is intentionally testing-flavored, not production hardening:
+    use it as a memory/session-retention probe, and as a guard against
+    accidental identity sharing when several ephemeral sessions run from the
+    same workdir.
+    """
+    raw = os.environ.get("AX_GATEWAY_SESSION_CHALLENGE", "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _generate_session_challenge_code() -> str:
+    """Short URL-safe code suitable for an operator to read and echo back.
+
+    Uppercased so it's distinct from any base64-shaped token in the same
+    output and easy to type. ~6–8 chars depending on the random bytes' shape.
+    """
+    return secrets.token_urlsafe(4).upper()
+
+
+def _find_local_session_record(registry: dict, session_id: str) -> dict | None:
+    """Look up the registry record for a verified local session id."""
+    target = (session_id or "").strip()
+    if not target:
+        return None
+    for item in registry.get("local_sessions") or []:
+        if str(item.get("session_id") or "") == target:
+            return item
+    return None
+
+
+def _ensure_session_challenge(
+    registry: dict,
+    session_id: str,
+    *,
+    provided_proof: str | None,
+) -> str:
+    """Verify or issue a session-continuity challenge.
+
+    Returns the next challenge code (the proof the caller should echo back
+    on the *next* send) when the provided proof matches the stored one.
+
+    Raises ``ValueError`` with a structured error message in two cases:
+    no stored challenge yet (a new one is issued for the next send), or
+    proof mismatch / missing proof against an existing stored challenge.
+    Both error messages start with a recognizable prefix so callers can
+    surface them without further parsing.
+    """
+    record = _find_local_session_record(registry, session_id)
+    if record is None:
+        # The token verified upstream, but the registry record is gone —
+        # treat as a hard rejection rather than auto-issuing a challenge for
+        # an unknown session.
+        raise ValueError("session_challenge_unknown_session: no record for this session.")
+
+    stored = str(record.get("challenge_code") or "").strip()
+    proof = str(provided_proof or "").strip()
+
+    if not stored:
+        # First send under the flag for this session: issue a challenge and
+        # require the caller to echo it on the next send.
+        new_code = _generate_session_challenge_code()
+        record["challenge_code"] = new_code
+        record["challenge_issued_at"] = datetime.now(timezone.utc).isoformat()
+        save_gateway_registry(registry)
+        raise ValueError(
+            f"session_challenge_required: {new_code}. Re-run with --session-proof <code> to confirm session continuity."
+        )
+
+    if not proof:
+        raise ValueError(
+            f"session_challenge_required: {stored}. Re-run with --session-proof <code> to confirm session continuity."
+        )
+
+    if proof != stored:
+        raise ValueError(
+            f"invalid_session_proof: expected {stored}. "
+            "Run once without --session-proof to re-issue the challenge if you've lost it."
+        )
+
+    # Valid proof: rotate the code so the caller has a fresh proof for the
+    # next send. Each successful send consumes one code.
+    new_code = _generate_session_challenge_code()
+    record["challenge_code"] = new_code
+    record["challenge_issued_at"] = datetime.now(timezone.utc).isoformat()
+    save_gateway_registry(registry)
+    return new_code
+
+
 def _send_local_session_message(*, session_token: str, body: dict) -> dict:
     registry = load_gateway_registry()
     session = verify_local_session_token(registry, session_token)
@@ -566,6 +662,19 @@ def _send_local_session_message(*, session_token: str, body: dict) -> dict:
         raise ValueError("space_id is required.")
     if not content:
         raise ValueError("content is required.")
+
+    # aX task 68cb4d29: Phase-1 opt-in session-continuity challenge. Only
+    # gates the /local/send path for now; everything else (inbox poll,
+    # generic proxy methods) keeps the easy path. When the env flag is
+    # not set, this is a no-op — preserving the current behavior.
+    next_session_proof: str | None = None
+    if _gateway_session_challenge_enabled():
+        next_session_proof = _ensure_session_challenge(
+            registry,
+            str(session.get("session_id") or ""),
+            provided_proof=str(body.get("session_proof") or "").strip() or None,
+        )
+
     client = _load_managed_agent_client(entry)
     metadata = {
         **(body.get("metadata") if isinstance(body.get("metadata"), dict) else {}),
@@ -604,7 +713,10 @@ def _send_local_session_message(*, session_token: str, body: dict) -> dict:
         message_id=(payload.get("message") or {}).get("id"),
         attachment_count=len(attachments_payload or []),
     )
-    return {"agent": entry.get("name"), "message": payload, "session": session}
+    response = {"agent": entry.get("name"), "message": payload, "session": session}
+    if next_session_proof is not None:
+        response["next_session_proof"] = next_session_proof
+    return response
 
 
 def _create_local_session_task(*, session_token: str, body: dict) -> dict:
@@ -7298,6 +7410,16 @@ def local_send(
         help="Seconds to wait for inbound messages after sending. Use 0 to only check immediately.",
     ),
     inbox_limit: int = typer.Option(10, "--inbox-limit", min=1, max=100, help="Max inbound messages to return."),
+    session_proof: str = typer.Option(
+        None,
+        "--session-proof",
+        help=(
+            "Echo back the challenge code Gateway issued on the previous send. "
+            "Only required when AX_GATEWAY_SESSION_CHALLENGE is enabled on the Gateway "
+            "(opt-in session-continuity test). On a successful send under the flag, the "
+            "response includes next_session_proof for the following call."
+        ),
+    ),
     as_json: bool = JSON_OPTION,
 ):
     """Send through an approved local pass-through Gateway session."""
@@ -7320,6 +7442,8 @@ def local_send(
     )
 
     body = {"content": content, "space_id": space_id, "parent_id": parent_id}
+    if session_proof:
+        body["session_proof"] = session_proof.strip()
     try:
         response = httpx.post(
             f"{gateway_url.rstrip('/')}/local/send",
@@ -7335,6 +7459,12 @@ def local_send(
             detail = exc.response.json().get("error", detail)
         except Exception:
             pass
+        # Surface session-challenge errors so the operator can see the code
+        # and the next step without sifting through generic "send failed" text.
+        if isinstance(detail, str) and (
+            detail.startswith("session_challenge_required:") or detail.startswith("invalid_session_proof:")
+        ):
+            raise typer.BadParameter(detail) from exc
         raise typer.BadParameter(f"Gateway local send failed: {detail}") from exc
     except Exception as exc:
         raise typer.BadParameter(f"Gateway local send failed: {exc}") from exc
@@ -7372,6 +7502,11 @@ def local_send(
         print_json(payload)
         return
     console.print(f"[green]Sent through Gateway[/green] as @{payload.get('agent')}")
+    if payload.get("next_session_proof"):
+        console.print(
+            f"[cyan]Next session-proof:[/cyan] {payload['next_session_proof']} "
+            "(echo this with --session-proof on the next send)"
+        )
     _print_pending_reply_warning_local(pending)
     inbox_payload = payload.get("inbox") if isinstance(payload.get("inbox"), dict) else {}
     messages = inbox_payload.get("messages") if isinstance(inbox_payload, dict) else []
