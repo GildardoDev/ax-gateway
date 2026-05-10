@@ -3,10 +3,41 @@
 import sys
 from typing import Optional
 
-import httpx
-import typer
 
-from .commands import (
+def _reconfigure_stdio_to_utf8() -> None:
+    """Force UTF-8 on stdout/stderr at CLI entry so Rich and our own prints
+    don't crash on Windows consoles defaulting to cp1252.
+
+    The classic symptom is ``UnicodeEncodeError: 'charmap' codec can't encode
+    character '\\u2192'`` (or any of the table-drawing / arrow / check-mark
+    glyphs Rich emits). The fix has to run *before* any module-level code
+    that initializes a Rich Console (``ax_cli.output.console`` is the main
+    one) — Rich snapshots the stream's encoding when it builds its renderer.
+
+    Uses ``errors='replace'`` so a truly un-encodable codepoint that slips
+    through can never crash a CLI run; the user sees a replacement char
+    instead of a traceback. Streams that don't expose ``reconfigure``
+    (StringIO in tests, redirected pipes that wrap a non-text buffer) are
+    left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            # Stream may already be detached, write-only, or refuse the
+            # encoding change; nothing actionable we can do at startup.
+            pass
+
+
+_reconfigure_stdio_to_utf8()
+
+import httpx  # noqa: E402  — must follow stdio reconfig
+import typer  # noqa: E402
+
+from .commands import (  # noqa: E402
     agents,
     alerts,
     apps,
