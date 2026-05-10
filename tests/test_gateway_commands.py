@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import socket
 import sys
 import threading
@@ -18,6 +19,12 @@ from ax_cli.commands import gateway as gateway_cmd
 from ax_cli.main import app
 
 runner = CliRunner()
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text)
 
 
 class _FakeTokenExchanger:
@@ -123,9 +130,12 @@ def test_gateway_local_init_rejects_missing_workdir_by_default(monkeypatch, tmp_
         ["gateway", "local", "init", "mac_backend", "--workdir", str(missing)],
     )
 
+    # Rich/Typer can split flag names with ANSI color escapes on color-capable
+    # terminals (CI), so normalize before substring asserts.
+    output = _strip_ansi(result.output)
     assert result.exit_code != 0
-    assert "does not exist" in result.output
-    assert "--create-workdir" in result.output
+    assert "does not exist" in output
+    assert "--create-workdir" in output
     assert not missing.exists(), "workdir must not be created without --create-workdir"
     assert not (missing / ".ax").exists()
 
