@@ -23,7 +23,8 @@ disk or reused across agent restarts.
 ## Consequences
 
 - **Positive:** A leaked session token has limited blast radius — it expires
-  and cannot be replayed after the session ends.
+  via TTL. There is no active session-end invalidation; the primary mitigation
+  is short token lifetimes.
 - **Positive:** Token compromise has a bounded window — tokens expire via TTL.
   There is no restart-based invalidation; the primary protection is short expiry.
 - **Positive:** Simpler token lifecycle — no cache invalidation, no stale token
