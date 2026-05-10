@@ -780,26 +780,27 @@ def _create_local_session_task(*, session_token: str, body: dict) -> dict:
 
 
 _LOCAL_PROXY_METHODS: dict[str, dict] = {
-    "whoami": {},
-    "list_spaces": {},
-    "list_agents": {"kwargs": ["space_id", "limit"]},
-    "list_agents_availability": {"kwargs": ["space_id", "filter_"]},
-    "list_context": {"kwargs": ["prefix", "space_id"]},
-    "get_context": {"args": ["key"], "kwargs": ["space_id"]},
+    "whoami": {"tier": "use"},
+    "list_spaces": {"tier": "use"},
+    "list_agents": {"tier": "use", "kwargs": ["space_id", "limit"]},
+    "list_agents_availability": {"tier": "use", "kwargs": ["space_id", "filter_"]},
+    "list_context": {"tier": "use", "kwargs": ["prefix", "space_id"]},
+    "get_context": {"tier": "use", "args": ["key"], "kwargs": ["space_id"]},
     "list_messages": {
+        "tier": "use",
         "kwargs": ["limit", "space_id", "channel", "agent_id", "unread_only", "mark_read"],
     },
-    "get_message": {"args": ["message_id"]},
-    "search_messages": {"args": ["query"], "kwargs": ["limit", "agent_id"]},
-    "list_tasks": {"kwargs": ["limit", "space_id"]},
-    "get_task": {"args": ["task_id"]},
-    "update_task": {"args": ["task_id"], "kwargs": ["status", "priority", "assignee_id"]},
+    "get_message": {"tier": "use", "args": ["message_id"]},
+    "search_messages": {"tier": "use", "args": ["query"], "kwargs": ["limit", "agent_id"]},
+    "list_tasks": {"tier": "use", "kwargs": ["limit", "space_id"]},
+    "get_task": {"tier": "use", "args": ["task_id"]},
+    "update_task": {"tier": "admin", "args": ["task_id"], "kwargs": ["status", "priority", "assignee_id"]},
     # File upload proxy: agents on the Gateway-native path can attach files
     # to messages without holding the user PAT. Daemon reads the path on
     # behalf of the agent and uploads via the agent's managed AxClient, so
     # the upload is correctly attributed to the agent identity. Local-only
     # by construction (paths are relative to the operator's filesystem).
-    "upload_file": {"args": ["file_path"], "kwargs": ["space_id"]},
+    "upload_file": {"tier": "admin", "args": ["file_path"], "kwargs": ["space_id"]},
 }
 
 
