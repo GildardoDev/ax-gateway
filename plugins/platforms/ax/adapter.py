@@ -562,7 +562,10 @@ class AxAdapter(BasePlatformAdapter):
             "content": content,
             "space_id": self.space_id,
         }
-        thread_anchor = reply_to or chat_id
+        chat_anchor = str(chat_id or "").strip()
+        thread_anchor = str(reply_to).strip() if reply_to else ""
+        if not thread_anchor and chat_anchor and chat_anchor != self.space_id:
+            thread_anchor = chat_anchor
         if thread_anchor:
             body["parent_id"] = thread_anchor
 

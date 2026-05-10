@@ -188,7 +188,8 @@ def test_gateway_local_init_rejects_workdir_pointing_at_a_file(monkeypatch, tmp_
     )
 
     assert result.exit_code != 0
-    assert "not a directory" in result.output
+    assert "Invalid value" in result.output
+    assert "--workdir" in result.output
 
 
 def test_ensure_workdir_helper_no_create_when_exists(tmp_path):
@@ -5048,7 +5049,7 @@ def test_gateway_ui_external_runtime_announce_marks_plugin_active(monkeypatch, t
             "base_url": "https://paxai.app",
             "template_id": "hermes",
             "runtime_type": "hermes_sentinel",
-            "desired_state": "stopped",
+            "desired_state": "running",
             "effective_state": "stopped",
             "transport": "gateway",
             "credential_source": "gateway",
@@ -5099,6 +5100,68 @@ def test_gateway_ui_external_runtime_announce_marks_plugin_active(monkeypatch, t
         thread.join(timeout=2.0)
 
 
+def test_gateway_ui_external_runtime_announce_respects_operator_stop(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    registry = gateway_core.load_gateway_registry()
+    registry["agents"] = [
+        {
+            "name": "nova",
+            "agent_id": "agent-nova",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "template_id": "hermes",
+            "runtime_type": "hermes_sentinel",
+            "desired_state": "stopped",
+            "effective_state": "stopped",
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "attestation_state": "verified",
+            "approval_state": "approved",
+            "identity_status": "verified",
+            "environment_status": "environment_allowed",
+            "space_status": "active_allowed",
+        }
+    ]
+    gateway_core.save_gateway_registry(registry)
+
+    handler = gateway_cmd._build_gateway_ui_handler(activity_limit=5, refresh_ms=1500)
+    with closing(socket.socket()) as probe:
+        probe.bind(("127.0.0.1", 0))
+        host, port = probe.getsockname()
+    server = gateway_cmd._GatewayUiServer((host, port), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with httpx.Client(base_url=f"http://{host}:{port}", timeout=2.0) as client:
+            announced = client.post(
+                "/api/agents/nova/external-runtime-announce",
+                json={
+                    "runtime_kind": "hermes_plugin",
+                    "status": "connected",
+                    "pid": 12345,
+                    "activity": "Hermes plugin listener connected",
+                },
+            )
+            assert announced.status_code == 200
+            payload = announced.json()
+            assert payload["connected"] is False
+            assert payload["effective_state"] == "stopped"
+            assert payload["desired_state"] == "stopped"
+            assert payload["local_attach_state"] == "external_stopped"
+
+            stored = gateway_core.find_agent_entry(gateway_core.load_gateway_registry(), "nova")
+            assert stored["desired_state"] == "stopped"
+            assert stored["effective_state"] == "stopped"
+            assert stored["runtime_instance_id"] is None
+            assert stored["external_runtime_managed"] is True
+            assert stored["external_runtime_state"] == "connected"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2.0)
+
+
 def test_gateway_daemon_does_not_launch_managed_process_for_external_runtime(tmp_path):
     entry = {
         "name": "nova",
@@ -5118,6 +5181,35 @@ def test_gateway_daemon_does_not_launch_managed_process_for_external_runtime(tmp
     assert daemon._runtimes == {}
     assert entry["effective_state"] == "running"
     assert entry["runtime_instance_id"] == "external:hermes_plugin:nova:12345"
+
+
+def test_gateway_daemon_external_runtime_respects_operator_stop(tmp_path):
+    entry = {
+        "name": "nova",
+        "template_id": "hermes",
+        "runtime_type": "hermes_sentinel",
+        "desired_state": "stopped",
+        "effective_state": "running",
+        "external_runtime_state": "connected",
+        "external_runtime_kind": "hermes_plugin",
+        "external_runtime_instance_id": "external:hermes_plugin:nova:12345",
+        "runtime_instance_id": "external:hermes_plugin:nova:12345",
+        "current_status": "processing",
+        "current_tool": "search_docs",
+        "current_tool_call_id": "tool-1",
+        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    daemon = gateway_core.GatewayDaemon(client_factory=lambda **kwargs: None)
+    daemon._reconcile_runtime(entry)
+
+    assert daemon._runtimes == {}
+    assert entry["effective_state"] == "stopped"
+    assert entry["runtime_instance_id"] is None
+    assert entry["current_status"] is None
+    assert entry["current_tool"] is None
+    assert entry["current_tool_call_id"] is None
+    assert entry["local_attach_state"] == "external_stopped"
 
 
 def test_gateway_daemon_preserves_stale_external_plugin_without_legacy_fallback(tmp_path):

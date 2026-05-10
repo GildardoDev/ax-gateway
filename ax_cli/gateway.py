@@ -2662,7 +2662,8 @@ def annotate_runtime_health(
     raw_state = state
     attached_session_alive = False
     liveness, connected = _derive_liveness(enriched, raw_state=state, last_seen_age=last_seen_age)
-    if _external_runtime_connected(enriched, last_seen_age=last_seen_age):
+    desired_stopped = str(enriched.get("desired_state") or "").lower() == "stopped"
+    if not desired_stopped and _external_runtime_connected(enriched, last_seen_age=last_seen_age):
         liveness = "connected"
         connected = True
         state = "running"
@@ -5953,6 +5954,22 @@ class GatewayDaemon:
             if runtime is not None:
                 runtime.stop()
                 self._runtimes.pop(name, None)
+            if desired_state == "stopped":
+                entry.update(
+                    {
+                        "effective_state": "stopped",
+                        "runtime_instance_id": None,
+                        "current_status": None,
+                        "current_tool": None,
+                        "current_tool_call_id": None,
+                        "backlog_depth": 0,
+                    }
+                )
+                entry["local_attach_state"] = "external_stopped"
+                entry["local_attach_detail"] = (
+                    "Operator requested stop; external runtime heartbeats will not mark this agent live."
+                )
+                return
             last_seen_age = _age_seconds(entry.get("last_seen_at"))
             external_connected = _external_runtime_connected(entry, last_seen_age=last_seen_age)
             external_stopped = external_runtime_state in {"offline", "stopped", "disconnected"}

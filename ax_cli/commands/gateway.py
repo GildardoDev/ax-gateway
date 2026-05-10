@@ -1833,7 +1833,11 @@ def _announce_external_agent_runtime(name: str, body: dict) -> dict:
     if not runtime_instance_id:
         runtime_instance_id = f"external:{runtime_kind}:{name}:{pid or 'unknown'}"
 
-    entry["desired_state"] = "running" if status not in _EXTERNAL_RUNTIME_STOPPED_STATUSES else "stopped"
+    desired_stopped = str(entry.get("desired_state") or "stopped").strip().lower() == "stopped"
+    if status in _EXTERNAL_RUNTIME_STOPPED_STATUSES:
+        entry["desired_state"] = "stopped"
+    elif not desired_stopped:
+        entry["desired_state"] = "running"
     entry["runtime_instance_id"] = runtime_instance_id
     entry["external_runtime_instance_id"] = runtime_instance_id
     entry["external_runtime_kind"] = runtime_kind
@@ -1852,6 +1856,19 @@ def _announce_external_agent_runtime(name: str, body: dict) -> dict:
         entry["current_status"] = None
         entry["current_tool"] = None
         entry["current_tool_call_id"] = None
+        if activity:
+            entry["current_activity"] = activity[:240]
+    elif desired_stopped:
+        entry["effective_state"] = "stopped"
+        entry["runtime_instance_id"] = None
+        entry["last_seen_at"] = now
+        entry["current_status"] = None
+        entry["current_tool"] = None
+        entry["current_tool_call_id"] = None
+        entry["local_attach_state"] = "external_stopped"
+        entry["local_attach_detail"] = (
+            "Operator requested stop; external runtime heartbeats will not mark this agent live."
+        )
         if activity:
             entry["current_activity"] = activity[:240]
     else:

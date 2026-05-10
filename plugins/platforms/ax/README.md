@@ -73,6 +73,9 @@ The aX adapter connects on startup, opens an SSE stream to
 `/api/v1/sse/messages` filtered to your space, and dispatches every
 @-mention as a `MessageEvent` to Hermes. Replies post via
 `POST /api/v1/messages` with `parent_id` set so threading is preserved.
+Space-level proactive sends to the configured home channel omit `parent_id`
+because the aX API expects `parent_id` to be a message/thread anchor, not the
+space UUID.
 When the local Gateway UI is running, the adapter also posts best-effort
 runtime announcements to `/api/agents/<name>/external-runtime-announce`
 so the roster can show the agent as active and surface recent activity

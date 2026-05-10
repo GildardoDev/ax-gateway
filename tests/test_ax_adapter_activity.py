@@ -267,6 +267,87 @@ def test_stop_typing_marks_processing_status_completed(monkeypatch):
     assert calls == [{"message_id": "msg-1", "status": "completed", "activity": None}]
 
 
+def test_send_omits_parent_id_for_space_level_home_channel(monkeypatch):
+    adapter = _adapter()
+    posts = []
+
+    async def fake_get_jwt():
+        return "jwt-1"
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            posts.append({"url": url, **kwargs})
+            return type(
+                "Response",
+                (),
+                {
+                    "status_code": 201,
+                    "headers": {"content-type": "application/json"},
+                    "text": "",
+                    "json": lambda self: {"id": "msg-out"},
+                },
+            )()
+
+    monkeypatch.setattr(adapter, "_get_jwt", fake_get_jwt)
+    monkeypatch.setattr(_MODULE.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(adapter.send(adapter.space_id, "proactive note"))
+
+    assert result.success is True
+    assert posts[0]["json"] == {"content": "proactive note", "space_id": "space-123"}
+
+
+def test_send_keeps_parent_id_for_thread_or_reply_anchor(monkeypatch):
+    adapter = _adapter()
+    posts = []
+
+    async def fake_get_jwt():
+        return "jwt-1"
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, url, **kwargs):
+            posts.append({"url": url, **kwargs})
+            return type(
+                "Response",
+                (),
+                {
+                    "status_code": 201,
+                    "headers": {"content-type": "application/json"},
+                    "text": "",
+                    "json": lambda self: {"id": "msg-out"},
+                },
+            )()
+
+    monkeypatch.setattr(adapter, "_get_jwt", fake_get_jwt)
+    monkeypatch.setattr(_MODULE.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(adapter.send("msg-root", "thread note"))
+    reply_result = asyncio.run(adapter.send(adapter.space_id, "reply note", reply_to="msg-parent"))
+
+    assert result.success is True
+    assert reply_result.success is True
+    assert posts[0]["json"]["parent_id"] == "msg-root"
+    assert posts[1]["json"]["parent_id"] == "msg-parent"
+
+
 def test_announce_local_gateway_posts_external_runtime_state(monkeypatch):
     adapter = _adapter()
     posts = []
