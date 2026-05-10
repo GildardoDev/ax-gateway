@@ -27,7 +27,7 @@ Use this skill when the task is:
    - Managed agents get their own Gateway-owned runtime token and identity.
 
 2. Prefer Gateway-native templates first.
-   - `echo`
+   - `echo_test`
    - `ollama`
    - `hermes`
    - `claude_code_channel`
@@ -69,7 +69,7 @@ Pick the template that matches the asset class and intake model you want.
 Examples:
 
 ```bash
-uv run ax gateway agents add echo-bot --template echo
+uv run ax gateway agents add echo-bot --template echo_test
 uv run ax gateway agents add northstar --template hermes --workdir /absolute/path/to/hermes-workspace
 uv run ax gateway agents add ollama-bot --template ollama
 uv run ax gateway agents add orion --template claude_code_channel --workdir /absolute/path/to/claude-workspace

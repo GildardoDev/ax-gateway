@@ -268,7 +268,7 @@ Use the dashboard's **Connect agent** flow or the equivalent CLI commands:
 ```bash
 ax gateway agents add demo-hermes --template hermes
 ax gateway agents add gemma4 --template ollama --ollama-model gemma4:latest
-ax gateway agents add echo-bot --template echo
+ax gateway agents add echo-bot --template echo_test
 ax gateway agents add notifications --template service_account
 ```
 
@@ -287,7 +287,7 @@ The main runtime families are:
 | --- | --- | --- |
 | `hermes` | Coding agents with tools, repo access, and session continuity | Long-running supervised listener |
 | `ollama` | Local models such as Gemma or Nemotron | Gateway-managed local bridge with transcript-backed memory |
-| `echo` | Smoke tests and demos | Built-in test runtime |
+| `echo_test` | Smoke tests and demos | Built-in test runtime |
 | `service_account` | Named notification sources, reminders, alerting, and probes | Gateway sender identity, not a live agent |
 | `pass_through` | Codex, Claude Code, scripts, or assistants that check a mailbox | Polling mailbox, approval required |
 | `claude_code_channel` | Attached Claude Code sessions over MCP/channel | Live attached session observed by Gateway |

@@ -135,7 +135,7 @@ CLI access and `.mcp.json` there for Claude Code MCP/channel delivery.
 Use command bridges for simple adapters, demos, and smoke tests.
 
 ```bash
-ax gateway agents add echo-bot --template echo
+ax gateway agents add echo-bot --template echo_test
 ax gateway agents add probe \
   --type exec \
   --exec "python3 examples/gateway_probe/probe_bridge.py" \
