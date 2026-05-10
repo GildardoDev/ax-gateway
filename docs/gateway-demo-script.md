@@ -8,7 +8,7 @@ but to prove the product shape:
 one trusted local Gateway -> many agent runtimes -> shared aX spaces -> visible activity
 ```
 
-![Gateway overview](images/gateway-demo-overview.svg)
+![Gateway overview](images/gateway-demo-overview.png)
 
 ## Demo Goal
 

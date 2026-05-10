@@ -1,14 +1,14 @@
 # Release Process
 
-`axctl` releases are designed for dev/staging co-promotion and automatic PyPI
+`axctl` releases are designed for main-branch integration and automatic PyPI
 publication.
 
 ## Flow
 
-1. Merge feature work into `dev/staging`.
-2. Validate `dev/staging` with automated tests, package build when needed, and
+1. Branch off `main` and open a PR against `main`.
+2. Validate with automated tests, package build when needed, and
    the operator QA sequence in [Operator QA Runbook](./operator-qa-runbook.md).
-3. Promote `dev/staging` to `main` with a reviewed PR.
+3. Merge the PR into `main` after review.
 4. Release Please opens or updates a release PR on `main` with:
    - `pyproject.toml` version bump
    - `.release-please-manifest.json` version bump
@@ -94,8 +94,8 @@ not to arbitrary commits.
 
 Current steady-state:
 
-1. Feature work lands in `dev/staging`.
-2. A reviewed promotion PR lands on `main`.
+1. Feature work lands in `main` via reviewed PRs.
+2. CI validates the merge.
 3. Release Please opens a release PR that only changes release metadata.
 4. A human reviews and merges the release PR.
 5. Release Please creates the GitHub tag/release.
@@ -113,8 +113,8 @@ Use SemVer, with normal `0.x` pre-1.0 semantics:
 - `feat:` creates a minor release for user-visible CLI capability.
 - Breaking CLI changes should be rare; if needed before 1.0, document them
   clearly in the release notes and prefer a minor bump.
-- Batch related `dev/staging` work into coherent releases instead of publishing
-  every small commit independently.
+- Batch related work into coherent releases instead of publishing every small
+  commit independently.
 
 For `axctl`, a good release is one that an operator can understand from the
 changelog: what changed, why it matters, and whether any setup or credential

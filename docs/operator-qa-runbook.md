@@ -138,7 +138,7 @@ matrix row.
 
 ## Promotion Drift Check
 
-Use this before promoting dev/staging behavior or when comparing environments:
+Use this before promoting changes or when comparing environments:
 
 ```bash
 axctl qa matrix \
@@ -286,7 +286,7 @@ verification fails, so a shell can silently keep its previous identity unless
 ## Sample Release Flow
 
 ```bash
-git checkout dev/staging
+git checkout main
 git pull --ff-only
 
 uv run ruff check .
