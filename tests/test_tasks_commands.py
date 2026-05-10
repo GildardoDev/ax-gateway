@@ -335,24 +335,97 @@ def test_tasks_update_assign_to_resolves_handle_via_task_space(monkeypatch):
     }
 
 
-def test_tasks_update_assign_to_rejected_on_gateway_path(monkeypatch):
+def test_tasks_update_assign_to_uuid_through_gateway(monkeypatch):
+    """UUID assignee_id forwards through the Gateway proxy without a handle lookup."""
+    calls = []
+    agent_id = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
+
     monkeypatch.setattr(
         "ax_cli.commands.tasks.resolve_gateway_config",
         lambda: {"url": "http://127.0.0.1:8765", "agent_name": "wishy", "workdir": "/repo"},
     )
 
-    def _should_not_call(**kwargs):
-        raise AssertionError(f"Gateway path should not run when --assign-to is rejected: {kwargs}")
+    def fake_gateway_local_call(*, gateway_cfg, method, args=None, **_):
+        calls.append({"method": method, "args": dict(args or {})})
+        if method == "update_task":
+            return {"id": args["task_id"], **{k: v for k, v in args.items() if k != "task_id"}}
+        raise AssertionError(f"unexpected proxy method: {method}")
 
-    monkeypatch.setattr("ax_cli.commands.tasks._gateway_local_call", _should_not_call)
+    monkeypatch.setattr("ax_cli.commands.tasks._gateway_local_call", fake_gateway_local_call)
 
     result = runner.invoke(
         app,
-        ["tasks", "update", "task-42", "--assign-to", "demo-agent"],
+        ["tasks", "update", "task-42", "--assign-to", agent_id, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    # UUID short-circuits — no get_task / list_agents needed.
+    assert [c["method"] for c in calls] == ["update_task"]
+    assert calls[0]["args"] == {"task_id": "task-42", "assignee_id": agent_id}
+
+
+def test_tasks_update_assign_to_handle_through_gateway(monkeypatch):
+    """Handle assign-to resolves via Gateway-proxied get_task + list_agents, then forwards UUID."""
+    calls = []
+
+    monkeypatch.setattr(
+        "ax_cli.commands.tasks.resolve_gateway_config",
+        lambda: {"url": "http://127.0.0.1:8765", "agent_name": "wishy", "workdir": "/repo"},
+    )
+
+    def fake_gateway_local_call(*, gateway_cfg, method, args=None, **_):
+        calls.append({"method": method, "args": dict(args or {})})
+        if method == "get_task":
+            return {"task": {"id": args["task_id"], "space_id": "space-9"}}
+        if method == "list_agents":
+            return {"agents": [{"id": "agent-789", "name": "demo-agent"}]}
+        if method == "update_task":
+            return {"id": args["task_id"], **{k: v for k, v in args.items() if k != "task_id"}}
+        raise AssertionError(f"unexpected proxy method: {method}")
+
+    monkeypatch.setattr("ax_cli.commands.tasks._gateway_local_call", fake_gateway_local_call)
+
+    result = runner.invoke(
+        app,
+        ["tasks", "update", "task-42", "--assign", "@demo-agent", "--status", "in_progress", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [c["method"] for c in calls] == ["get_task", "list_agents", "update_task"]
+    assert calls[0]["args"] == {"task_id": "task-42"}
+    assert calls[1]["args"] == {"space_id": "space-9", "limit": 500}
+    assert calls[2]["args"] == {
+        "task_id": "task-42",
+        "status": "in_progress",
+        "assignee_id": "agent-789",
+    }
+
+
+def test_tasks_update_assign_to_handle_through_gateway_no_match(monkeypatch):
+    """A handle that doesn't match any agent in the task's space exits cleanly with a clear error."""
+    monkeypatch.setattr(
+        "ax_cli.commands.tasks.resolve_gateway_config",
+        lambda: {"url": "http://127.0.0.1:8765", "agent_name": "wishy", "workdir": "/repo"},
+    )
+
+    def fake_gateway_local_call(*, gateway_cfg, method, args=None, **_):
+        if method == "get_task":
+            return {"task": {"id": args["task_id"], "space_id": "space-9"}}
+        if method == "list_agents":
+            return {"agents": [{"id": "other", "name": "someone-else"}]}
+        if method == "update_task":
+            raise AssertionError("update_task must not run when handle resolution fails")
+        raise AssertionError(f"unexpected proxy method: {method}")
+
+    monkeypatch.setattr("ax_cli.commands.tasks._gateway_local_call", fake_gateway_local_call)
+
+    result = runner.invoke(
+        app,
+        ["tasks", "update", "task-42", "--assign-to", "ghost-agent"],
     )
 
     assert result.exit_code == 1
-    assert "--assign-to is not supported with Gateway-native task updates" in result.output
+    assert "No visible agent found for assignment target 'ghost-agent'" in result.output
 
 
 def test_tasks_update_requires_at_least_one_field(monkeypatch):

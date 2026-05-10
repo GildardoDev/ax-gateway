@@ -467,11 +467,7 @@ def update(
     gateway_cfg = resolve_gateway_config()
     if gateway_cfg:
         if assign_to is not None:
-            typer.echo(
-                "Error: --assign-to is not supported with Gateway-native task updates yet.",
-                err=True,
-            )
-            raise typer.Exit(1)
+            fields["assignee_id"] = _resolve_update_assignee_id_via_gateway(gateway_cfg, task_id, assign_to)
         data = _gateway_local_call(
             gateway_cfg=gateway_cfg,
             method="update_task",
@@ -518,3 +514,53 @@ def _resolve_update_assignee_id(client, task_id: str, assignee: str) -> str:
         )
         raise typer.Exit(1)
     return _resolve_assignee_id(client, candidate, space_id=task_space_id)
+
+
+def _resolve_update_assignee_id_via_gateway(gateway_cfg: dict, task_id: str, assignee: str) -> str:
+    """Resolve --assign-to for ``ax tasks update`` when running through Gateway.
+
+    Mirrors ``_resolve_update_assignee_id`` but performs the lookups via the
+    Gateway local proxy (``get_task`` then ``list_agents``), so the managed
+    agent does not need a direct PAT to translate a handle into an agent UUID.
+    """
+    candidate = assignee.strip()
+    try:
+        return str(UUID(candidate))
+    except ValueError:
+        pass
+    current = _gateway_local_call(
+        gateway_cfg=gateway_cfg,
+        method="get_task",
+        args={"task_id": task_id},
+    )
+    if isinstance(current, dict) and isinstance(current.get("task"), dict):
+        current = current["task"]
+    task_space_id = str(current.get("space_id") or "") if isinstance(current, dict) else ""
+    if not task_space_id:
+        typer.echo(
+            f"Error: Could not determine space for task {task_id} to resolve assignee handle "
+            f"'{assignee}'. Pass an agent UUID instead.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    agents_result = _gateway_local_call(
+        gateway_cfg=gateway_cfg,
+        method="list_agents",
+        args={"space_id": task_space_id, "limit": 500},
+    )
+    handle = candidate.removeprefix("@").lower()
+    matches = [agent for agent in _agent_items(agents_result) if handle in _agent_names(agent)]
+    if not matches:
+        typer.echo(f"Error: No visible agent found for assignment target '{assignee}'.", err=True)
+        raise typer.Exit(1)
+    if len(matches) > 1:
+        typer.echo(
+            f"Error: Assignment target '{assignee}' matched multiple agents. Use an agent UUID.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    agent_id = matches[0].get("id")
+    if not agent_id:
+        typer.echo(f"Error: Agent '{assignee}' did not include an id in the API response.", err=True)
+        raise typer.Exit(1)
+    return str(agent_id)

@@ -793,7 +793,7 @@ _LOCAL_PROXY_METHODS: dict[str, dict] = {
     "search_messages": {"args": ["query"], "kwargs": ["limit", "agent_id"]},
     "list_tasks": {"kwargs": ["limit", "space_id"]},
     "get_task": {"args": ["task_id"]},
-    "update_task": {"args": ["task_id"], "kwargs": ["status", "priority"]},
+    "update_task": {"args": ["task_id"], "kwargs": ["status", "priority", "assignee_id"]},
     # File upload proxy: agents on the Gateway-native path can attach files
     # to messages without holding the user PAT. Daemon reads the path on
     # behalf of the agent and uploads via the agent's managed AxClient, so
