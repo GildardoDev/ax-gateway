@@ -383,8 +383,13 @@ class AxAdapter(BasePlatformAdapter):
             retryable=retryable,
         )
 
-    async def send_typing(self, chat_id: str) -> None:
-        """Best-effort processing-status ping (status=thinking)."""
+    async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Best-effort processing-status ping (status=thinking).
+
+        ``metadata`` accepted for base-class signature compatibility;
+        currently unused. aX's processing-status endpoint takes a fixed
+        message_id + status payload.
+        """
         try:
             jwt = await self._get_jwt()
         except Exception:
@@ -419,6 +424,46 @@ class AxAdapter(BasePlatformAdapter):
         text = (caption + "\n\n" + image_url).strip()
         return await self.send(chat_id, text)
 
+    async def edit_message(
+        self,
+        chat_id: str,
+        message_id: str,
+        content: str,
+        *,
+        finalize: bool = False,
+    ) -> SendResult:
+        """PATCH /api/v1/messages/{id} for in-place streaming edits.
+
+        Hermes calls this repeatedly during a streaming response so the
+        aX UI shows the reply growing instead of one-shot delivery.
+        ``finalize`` is informational on aX (no separate finalize state);
+        we treat it as a normal edit.
+        """
+        try:
+            jwt = await self._get_jwt()
+        except Exception as exc:
+            return SendResult(success=False, error=f"auth: {exc}", retryable=True)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                r = await client.patch(
+                    f"{self.base_url}/api/v1/messages/{message_id}",
+                    json={"content": content},
+                    headers={
+                        "Authorization": f"Bearer {jwt}",
+                        "Content-Type": "application/json",
+                        "X-Space-Id": self.space_id,
+                    },
+                )
+        except Exception as exc:
+            return SendResult(success=False, error=str(exc), retryable=True)
+        if r.status_code in (200, 204):
+            return SendResult(success=True, message_id=message_id)
+        return SendResult(
+            success=False,
+            error=f"status {r.status_code}: {r.text[:160]}",
+            retryable=r.status_code in (429,) or 500 <= r.status_code < 600,
+        )
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         return {
             "name": f"@{self.agent_name} / {self.space_id[:8]}",
@@ -446,12 +491,20 @@ def is_connected() -> bool:
 
 
 def _env_enablement() -> Optional[Dict[str, Any]]:
-    """Seed PlatformConfig.extra from env so env-only setups show up in status."""
+    """Seed PlatformConfig.extra from env so env-only setups show up in status.
+
+    Also auto-defaults AX_HOME_CHANNEL to AX_SPACE_ID so the gateway's
+    "no home channel" first-mention notice doesn't fire for env-only
+    setups — the agent's bound space *is* the natural home channel.
+    Operators who want a separate cron-delivery target can still set
+    AX_HOME_CHANNEL explicitly.
+    """
     token = os.getenv("AX_TOKEN")
     space = os.getenv("AX_SPACE_ID")
     agent = os.getenv("AX_AGENT_NAME")
     if not (token and space and agent):
         return None
+    os.environ.setdefault("AX_HOME_CHANNEL", space)
     extra: Dict[str, Any] = {
         "base_url": os.getenv("AX_BASE_URL", DEFAULT_BASE_URL),
         "space_id": space,
