@@ -64,6 +64,12 @@ DEFAULT_AUDIENCE = "ax-api"
 class AxAdapter(BasePlatformAdapter):
     """aX adapter — SSE in, REST out, one agent identity per instance."""
 
+    # aX has a first-class activity stream attached to the triggering message.
+    # Keep Hermes chat output final-only and route tool/activity updates through
+    # /agents/processing-status instead of transient message bubbles.
+    SUPPORTS_MESSAGE_EDITING = False
+    SUPPORTS_ACTIVITY_STATUS = True
+
     def __init__(self, config: PlatformConfig):
         super().__init__(config, Platform("ax"))
         extra: Dict[str, Any] = config.extra or {}
@@ -86,6 +92,40 @@ class AxAdapter(BasePlatformAdapter):
         self._jwt: Optional[str] = None
         self._jwt_expires_at: float = 0.0
         self._mention_lower = f"@{self.agent_name}".lower()
+
+    async def _post_processing_status(
+        self,
+        message_id: str,
+        status: str,
+        *,
+        activity: Optional[str] = None,
+    ) -> None:
+        """Best-effort POST to aX's original-message activity stream."""
+        try:
+            jwt = await self._get_jwt()
+        except Exception:
+            return
+        body = {
+            "message_id": message_id,
+            "agent_name": self.agent_name,
+            "agent_id": self.agent_id,
+            "space_id": self.space_id,
+            "status": status,
+        }
+        if activity:
+            body["activity"] = activity
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                await client.post(
+                    f"{self.base_url}/api/v1/agents/processing-status",
+                    json=body,
+                    headers={
+                        "Authorization": f"Bearer {jwt}",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception:
+            pass
 
     @property
     def name(self) -> str:
@@ -384,35 +424,25 @@ class AxAdapter(BasePlatformAdapter):
         )
 
     async def send_typing(self, chat_id: str, metadata: Optional[Dict[str, Any]] = None) -> None:
-        """Best-effort processing-status ping (status=thinking).
+        """Best-effort original-message processing/activity update.
 
-        ``metadata`` accepted for base-class signature compatibility;
-        currently unused. aX's processing-status endpoint takes a fixed
-        message_id + status payload.
+        Hermes uses ``send_typing`` both for generic keepalive status and, when
+        ``SUPPORTS_ACTIVITY_STATUS`` is set, for tool-progress activity. aX
+        renders these on the triggering message's activity stream instead of as
+        separate chat bubbles.
         """
-        try:
-            jwt = await self._get_jwt()
-        except Exception:
-            return
-        body = {
-            "message_id": chat_id,
-            "agent_name": self.agent_name,
-            "agent_id": self.agent_id,
-            "space_id": self.space_id,
-            "status": "thinking",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                await client.post(
-                    f"{self.base_url}/api/v1/agents/processing-status",
-                    json=body,
-                    headers={
-                        "Authorization": f"Bearer {jwt}",
-                        "Content-Type": "application/json",
-                    },
-                )
-        except Exception:
-            pass
+        metadata = metadata or {}
+        status = str(metadata.get("status") or "thinking")
+        activity = metadata.get("activity")
+        await self._post_processing_status(
+            chat_id,
+            status,
+            activity=str(activity) if activity else None,
+        )
+
+    async def stop_typing(self, chat_id: str) -> None:
+        """Mark the aX processing lifecycle complete after final delivery."""
+        await self._post_processing_status(chat_id, "completed")
 
     async def send_image(
         self,
