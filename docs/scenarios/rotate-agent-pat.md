@@ -3,6 +3,14 @@
 Replace an agent's PAT without downtime by minting the new token first,
 verifying it works, then revoking the old one.
 
+> **Scope:** this page documents the current PAT-based rotation path for
+> existing agent credentials. Gateway's intended direction is OAuth/device
+> login plus Gateway-brokered credentials — normal onboarding should not
+> require operators or agents to copy PATs manually. See
+> [DEVICE-TRUST-001](../../specs/DEVICE-TRUST-001/spec.md) and
+> [GATEWAY-AUTH-TIERS-001](../../specs/GATEWAY-AUTH-TIERS-001/spec.md) for
+> the trust-boundary direction.
+
 Background: [`docs/credential-security.md`](../credential-security.md#agent-pat-rotation)
 and [`docs/agent-authentication.md`](../agent-authentication.md#rotation-with-existing-cli-commands)
 explain the policy. This page is the operator runbook.
