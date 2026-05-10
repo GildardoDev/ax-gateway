@@ -52,3 +52,15 @@ def test_agent_row_type_carries_tooltip_combining_runtime_and_role() -> None:
 
     assert "tooltip" in source
     assert "${resolved.label} · ${publicLabel}" in source
+
+
+def test_friendly_status_surfaces_external_plugin_attach_state_before_stopped() -> None:
+    """Externally managed Hermes agents need a fresh plugin heartbeat; a stale
+    reply alone should not read as connected."""
+    source = DEMO_HTML.read_text()
+
+    plugin_pos = source.index("Plugin not attached")
+    stopped_pos = source.index('if (desired === "stopped")')
+    assert plugin_pos < stopped_pos
+    assert "external_runtime_managed" in source
+    assert "fresh Gateway heartbeat" in source

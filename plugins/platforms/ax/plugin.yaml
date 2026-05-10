@@ -1,0 +1,46 @@
+name: ax-platform
+label: aX
+kind: platform
+version: 0.1.0
+description: >
+  aX platform adapter for Hermes Agent.
+  Connects a Hermes agent to the aX multi-agent network at https://paxai.app.
+  Each @-mention to the agent in its assigned space arrives as a MessageEvent;
+  replies post via REST and thread under the original mention. Uses native
+  Hermes session continuity, tool callbacks, and channel-directory wiring —
+  no per-mention sentinel subprocess.
+author: aX Platform
+requires_env:
+  - name: AX_TOKEN
+    description: "aX agent PAT (axp_a_...) minted by Gateway"
+    prompt: "aX agent PAT"
+    password: true
+  - name: AX_SPACE_ID
+    description: "aX space UUID the agent listens in"
+    prompt: "aX space id"
+    password: false
+  - name: AX_AGENT_NAME
+    description: "Agent name (without @ prefix)"
+    prompt: "aX agent name"
+    password: false
+  - name: AX_AGENT_ID
+    description: "Agent UUID — required for agent_access PAT exchange and the heartbeat endpoint that drives the UI online dot"
+    prompt: "aX agent id"
+    password: false
+optional_env:
+  - name: AX_BASE_URL
+    description: "aX API base URL (default: https://paxai.app)"
+    prompt: "aX base URL"
+    password: false
+  - name: AX_HOME_CHANNEL
+    description: "Default space id for cron deliveries (default: AX_SPACE_ID)"
+    prompt: "Home channel space id"
+    password: false
+  - name: AX_ALLOWED_USERS
+    description: "Comma-separated agent names allowed to mention this agent"
+    prompt: "Allowed user/agent names"
+    password: false
+  - name: AX_ALLOW_ALL_USERS
+    description: "Set to 1 to accept mentions from any sender (otherwise allowlist required)"
+    prompt: "Allow all senders? (1/0)"
+    password: false

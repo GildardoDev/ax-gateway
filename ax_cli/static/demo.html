@@ -834,10 +834,23 @@
       const reason = String(agent.confidence_reason || "").toLowerCase();
       const approval = String(agent.approval_state || "").toLowerCase();
       const detail = String(agent.confidence_detail || "").trim();
+      const externalKind = String(agent.external_runtime_kind || "").toLowerCase();
+      const externalManaged = Boolean(agent.external_runtime_managed || externalKind);
+      const externalState = String(agent.external_runtime_state || "").toLowerCase();
       const counts = mailboxCounts(agent);
       const unread = counts.messages;
       const tasks = counts.tasks;
 
+      if (externalManaged && !agent.connected) {
+        const stopped = desired === "stopped" || ["offline", "stopped", "disconnected"].includes(externalState);
+        const kindLabel = externalKind === "hermes_plugin" ? "Hermes plugin" : "External runtime";
+        const externalDetail = String(agent.local_attach_detail || "").trim();
+        return {
+          label: stopped ? "Plugin stopped" : "Plugin not attached",
+          tone: "warning",
+          detail: externalDetail || `${kindLabel} has not sent a fresh Gateway heartbeat. Start the plugin process to receive messages.`,
+        };
+      }
       // Operator intent overrides observed presence — if the user hit Stop,
       // the agent should read "Stopped" immediately, even if a stale heartbeat
       // is still draining out of the system.

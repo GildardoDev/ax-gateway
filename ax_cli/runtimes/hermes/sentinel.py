@@ -630,33 +630,34 @@ def _run_via_runtime_plugin(
     api.signal_processing(parent_id, "started", space_id=space_id)
     api.signal_processing(parent_id, "thinking", space_id=space_id)
 
-    # ── Immediate progress reply ──
-    # Create a non-final reply right away so the user sees the agent is working.
-    # The stream updater edits this message in-place with tool progress,
-    # and the final result overwrites it when done.
+    # ── Optional streaming reply ──
+    # By default, progress belongs on the original message activity stream
+    # (AX_GATEWAY_EVENT / processing-status), not as an extra chat reply.
+    # If an operator explicitly enables AX_SENTINEL_STREAM_EDITS, create one
+    # editable reply and let the final result overwrite it.
     reply_id = None
-    progress_metadata = {
-        "top_level_ingress": False,
-        "routing": {
-            "mode": "direct_mention",
-            "source": "sse_agent",
-        },
-        "streaming_reply": {
-            "enabled": True,
-            "final": False,
-            "runtime": runtime_name,
-        },
-    }
-    progress_msg = api.send_message(
-        space_id=space_id,
-        content="Working\u2026",
-        parent_id=parent_id,
-        message_type="reply",
-        metadata=progress_metadata,
-    )
-    if progress_msg:
-        reply_id = progress_msg.get("id", "")
-        log.info(f"Progress reply created: {reply_id[:12]}")
+    if stream_edits:
+        progress_msg = api.send_message(
+            space_id=space_id,
+            content="Working\u2026",
+            parent_id=parent_id,
+            message_type="reply",
+            metadata={
+                "top_level_ingress": False,
+                "routing": {
+                    "mode": "direct_mention",
+                    "source": "sse_agent",
+                },
+                "streaming_reply": {
+                    "enabled": True,
+                    "final": False,
+                    "runtime": runtime_name,
+                },
+            },
+        )
+        if progress_msg:
+            reply_id = progress_msg.get("id", "")
+            log.info(f"Progress reply created: {reply_id[:12]}")
 
     accumulated_text = ""
     tool_count = 0

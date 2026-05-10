@@ -1032,6 +1032,29 @@ def _derive_liveness(snapshot: dict[str, Any], *, raw_state: str, last_seen_age:
     return "offline", False
 
 
+def _external_runtime_connected(snapshot: dict[str, Any], *, last_seen_age: int | None) -> bool:
+    state = str(snapshot.get("external_runtime_state") or "").strip().lower()
+    if state not in {"connected", "running", "active", "heartbeat"}:
+        return False
+    return last_seen_age is not None and last_seen_age <= RUNTIME_STALE_AFTER_SECONDS
+
+
+def _external_runtime_expected(snapshot: dict[str, Any]) -> bool:
+    """Whether this runtime is owned by an external process/plugin.
+
+    External Hermes platform adapters should stay externally managed across
+    Gateway restarts. A missing fresh heartbeat means "plugin not attached",
+    not permission to fall back to the legacy managed sentinel.
+    """
+    if bool(snapshot.get("external_runtime_managed")):
+        return True
+    if str(snapshot.get("external_runtime_kind") or "").strip():
+        return True
+    if str(snapshot.get("external_runtime_instance_id") or "").strip():
+        return True
+    return False
+
+
 def _pid_is_alive(pid: object) -> bool:
     try:
         pid_int = int(pid or 0)
@@ -2639,6 +2662,14 @@ def annotate_runtime_health(
     raw_state = state
     attached_session_alive = False
     liveness, connected = _derive_liveness(enriched, raw_state=state, last_seen_age=last_seen_age)
+    desired_stopped = str(enriched.get("desired_state") or "").lower() == "stopped"
+    if not desired_stopped and _external_runtime_connected(enriched, last_seen_age=last_seen_age):
+        liveness = "connected"
+        connected = True
+        state = "running"
+        runtime_kind = str(enriched.get("external_runtime_kind") or "external runtime").strip()
+        enriched["local_attach_state"] = "external_connected"
+        enriched["local_attach_detail"] = f"{runtime_kind} announced a live local connection."
     if profile["activation"] == "attach_only":
         local_pid_alive = str(enriched.get("desired_state") or "").lower() == "running" and _pid_is_alive(
             enriched.get("attached_session_pid")
@@ -5918,6 +5949,65 @@ class GatewayDaemon:
         )
         space_status = _normalized_optional_controlled(entry.get("space_status"), _CONTROLLED_SPACE_STATUSES)
         runtime = self._runtimes.get(name)
+        external_runtime_state = str(entry.get("external_runtime_state") or "").strip().lower()
+        if external_runtime_state or _external_runtime_expected(entry):
+            if runtime is not None:
+                runtime.stop()
+                self._runtimes.pop(name, None)
+            if desired_state == "stopped":
+                entry.update(
+                    {
+                        "effective_state": "stopped",
+                        "runtime_instance_id": None,
+                        "current_status": None,
+                        "current_tool": None,
+                        "current_tool_call_id": None,
+                        "backlog_depth": 0,
+                    }
+                )
+                entry["local_attach_state"] = "external_stopped"
+                entry["local_attach_detail"] = (
+                    "Operator requested stop; external runtime heartbeats will not mark this agent live."
+                )
+                return
+            last_seen_age = _age_seconds(entry.get("last_seen_at"))
+            external_connected = _external_runtime_connected(entry, last_seen_age=last_seen_age)
+            external_stopped = external_runtime_state in {"offline", "stopped", "disconnected"}
+            entry.update(
+                {
+                    "effective_state": "running"
+                    if external_connected
+                    else ("stopped" if external_stopped else "stale"),
+                    "runtime_instance_id": entry.get("external_runtime_instance_id"),
+                    "backlog_depth": 0,
+                }
+            )
+            if not external_connected:
+                entry["current_status"] = None
+                entry["current_tool"] = None
+                entry["current_tool_call_id"] = None
+                if not external_stopped:
+                    entry["local_attach_state"] = "external_stale"
+                    entry["local_attach_detail"] = (
+                        "Gateway is waiting for a fresh external runtime heartbeat before routing work."
+                    )
+            return
+        if desired_state == "stopped":
+            if runtime is not None:
+                runtime.stop()
+                self._runtimes.pop(name, None)
+            entry.update(
+                {
+                    "effective_state": "stopped",
+                    "runtime_instance_id": None,
+                    "current_status": None,
+                    "current_activity": None,
+                    "current_tool": None,
+                    "current_tool_call_id": None,
+                    "backlog_depth": 0,
+                }
+            )
+            return
         hermes_status = hermes_setup_status(entry)
         if not hermes_status.get("ready", True):
             if runtime is not None:
@@ -6024,6 +6114,17 @@ class GatewayDaemon:
             if runtime is not None:
                 runtime.stop()
                 self._runtimes.pop(name, None)
+            entry.update(
+                {
+                    "effective_state": "stopped",
+                    "runtime_instance_id": None,
+                    "backlog_depth": 0,
+                    "current_status": None,
+                    "current_activity": None,
+                    "current_tool": None,
+                    "current_tool_call_id": None,
+                }
+            )
 
     def _reconcile_registry(self, registry: dict[str, Any], session: dict[str, Any]) -> dict[str, Any]:
         _ensure_registry_lists(registry)

@@ -1799,6 +1799,115 @@ def _mark_attached_agent_session(name: str, *, note: str | None = None) -> dict:
     return annotate_runtime_health(entry, registry=registry)
 
 
+_EXTERNAL_RUNTIME_RUNNING_STATUSES = {
+    "accepted",
+    "active",
+    "connected",
+    "heartbeat",
+    "processing",
+    "running",
+    "started",
+    "thinking",
+    "tool",
+    "working",
+}
+_EXTERNAL_RUNTIME_COMPLETE_STATUSES = {"completed", "done", "idle", "ready"}
+_EXTERNAL_RUNTIME_STOPPED_STATUSES = {"disconnected", "offline", "stopped"}
+
+
+def _announce_external_agent_runtime(name: str, body: dict) -> dict:
+    registry = load_gateway_registry()
+    entry = find_agent_entry(registry, name)
+    if not entry:
+        raise LookupError(f"Managed agent not found: {name}")
+
+    now = datetime.now(timezone.utc).isoformat()
+    status = str(body.get("status") or "connected").strip().lower()
+    runtime_kind = str(body.get("runtime_kind") or "external").strip() or "external"
+    message_id = str(body.get("message_id") or "").strip()
+    activity = str(body.get("activity") or body.get("status_text") or "").strip()
+    current_tool = str(body.get("current_tool") or body.get("tool") or "").strip()
+    pid = str(body.get("pid") or "").strip()
+    workdir = str(body.get("workdir") or "").strip()
+    runtime_instance_id = str(body.get("runtime_instance_id") or "").strip()
+    if not runtime_instance_id:
+        runtime_instance_id = f"external:{runtime_kind}:{name}:{pid or 'unknown'}"
+
+    desired_stopped = str(entry.get("desired_state") or "stopped").strip().lower() == "stopped"
+    if status in _EXTERNAL_RUNTIME_STOPPED_STATUSES:
+        entry["desired_state"] = "stopped"
+    elif not desired_stopped:
+        entry["desired_state"] = "running"
+    entry["runtime_instance_id"] = runtime_instance_id
+    entry["external_runtime_instance_id"] = runtime_instance_id
+    entry["external_runtime_kind"] = runtime_kind
+    entry["external_runtime_managed"] = True
+    entry["external_runtime_seen_at"] = now
+    entry["external_runtime_status"] = status
+    entry["external_runtime_state"] = "offline" if status in _EXTERNAL_RUNTIME_STOPPED_STATUSES else "connected"
+    if pid:
+        entry["external_runtime_pid"] = pid
+    if workdir:
+        entry["external_runtime_workdir"] = workdir
+
+    if status in _EXTERNAL_RUNTIME_STOPPED_STATUSES:
+        entry["effective_state"] = "stopped"
+        entry["last_disconnected_at"] = now
+        entry["current_status"] = None
+        entry["current_tool"] = None
+        entry["current_tool_call_id"] = None
+        if activity:
+            entry["current_activity"] = activity[:240]
+    elif desired_stopped:
+        entry["effective_state"] = "stopped"
+        entry["runtime_instance_id"] = None
+        entry["last_seen_at"] = now
+        entry["current_status"] = None
+        entry["current_tool"] = None
+        entry["current_tool_call_id"] = None
+        entry["local_attach_state"] = "external_stopped"
+        entry["local_attach_detail"] = (
+            "Operator requested stop; external runtime heartbeats will not mark this agent live."
+        )
+        if activity:
+            entry["current_activity"] = activity[:240]
+    else:
+        entry["effective_state"] = "running"
+        entry["last_seen_at"] = now
+        entry["last_connected_at"] = entry.get("last_connected_at") or now
+        entry["backlog_depth"] = 0
+        if status in _EXTERNAL_RUNTIME_RUNNING_STATUSES:
+            entry["current_status"] = "processing" if status in {"tool", "working"} else status
+            if activity:
+                entry["current_activity"] = activity[:240]
+            if current_tool:
+                entry["current_tool"] = current_tool[:120]
+        elif status in _EXTERNAL_RUNTIME_COMPLETE_STATUSES:
+            entry["current_status"] = None
+            entry["current_tool"] = None
+            entry["current_tool_call_id"] = None
+            if activity:
+                entry["current_activity"] = activity[:240]
+        if message_id:
+            if status in _EXTERNAL_RUNTIME_COMPLETE_STATUSES:
+                entry["last_work_completed_at"] = now
+                entry["last_reply_message_id"] = message_id
+            else:
+                entry["last_work_received_at"] = now
+                entry["last_received_message_id"] = message_id
+
+    save_gateway_registry(registry)
+    record_gateway_activity(
+        "external_runtime_announced",
+        entry=entry,
+        runtime_kind=runtime_kind,
+        runtime_status=status,
+        message_id=message_id or None,
+        activity_message=activity or None,
+    )
+    return annotate_runtime_health(entry, registry=registry)
+
+
 def _hide_managed_agents(names: list[str], *, reason: str = "operator_cleanup") -> dict:
     normalized_names = []
     seen = set()
@@ -5914,6 +6023,20 @@ def _build_gateway_ui_handler(*, activity_limit: int, refresh_ms: int):
                             note=str(body.get("note") or "").strip() or None,
                         )
                     except (LookupError, ValueError) as exc:
+                        _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    _write_json_response(self, payload)
+                    return
+                if parsed.path.endswith("/external-runtime-announce") and parsed.path.startswith("/api/agents/"):
+                    name = unquote(
+                        parsed.path.removeprefix("/api/agents/").removesuffix("/external-runtime-announce")
+                    ).strip()
+                    try:
+                        payload = _announce_external_agent_runtime(name, body)
+                    except LookupError as exc:
+                        _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.NOT_FOUND)
+                        return
+                    except ValueError as exc:
                         _write_json_response(self, {"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
                         return
                     _write_json_response(self, payload)
