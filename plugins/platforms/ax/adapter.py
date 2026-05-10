@@ -37,6 +37,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, AsyncIterator, Dict, Optional, Tuple
 
@@ -99,7 +100,12 @@ class AxAdapter(BasePlatformAdapter):
         self._stop_event = asyncio.Event()
         self._jwt: Optional[str] = None
         self._jwt_expires_at: float = 0.0
-        self._mention_lower = f"@{self.agent_name}".lower()
+        # Word-boundary mention pattern: rejects "@nova2" and "email@nova.com"
+        # while accepting "@nova", "@nova.", "@nova!", " @nova\n", etc.
+        self._mention_pattern = re.compile(
+            rf"(?<!\w)@{re.escape(self.agent_name)}(?!\w)",
+            re.IGNORECASE,
+        )
 
     async def _post_processing_status(
         self,
@@ -376,7 +382,7 @@ class AxAdapter(BasePlatformAdapter):
                     if name == self.agent_name.lower():
                         return True
         text = str(data.get("content") or data.get("text") or "")
-        return self._mention_lower in text.lower()
+        return bool(self._mention_pattern.search(text))
 
     async def _dispatch_inbound(self, data: Dict[str, Any]) -> None:
         if self._is_self_authored(data):
@@ -399,11 +405,17 @@ class AxAdapter(BasePlatformAdapter):
         # Reply path uses chat_id as parent_id so subsequent turns thread.
         chat_id = str(parent_id) if parent_id else message_id
 
+        # chat_type is always "thread": every aX message lives in a thread
+        # (a top-level mention is the root of one). Letting it flip between
+        # "channel" on turn 1 and "thread" on turn 2 would change the
+        # build_session_key output mid-conversation and split a single thread
+        # across two Hermes sessions, breaking continuity and the
+        # active-session guard.
         source = SessionSource(
             platform=self.platform,
             chat_id=chat_id,
             chat_name=f"@{self.agent_name} / {self.space_id[:8]}",
-            chat_type="thread" if parent_id else "channel",
+            chat_type="thread",
             user_id=sender_id or sender_name,
             user_name=sender_name,
             thread_id=chat_id,
