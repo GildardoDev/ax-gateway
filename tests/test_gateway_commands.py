@@ -3491,12 +3491,16 @@ def test_gateway_runtime_types_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["runtime_types"]]
-    assert ids == ["echo", "exec", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox"]
+    assert ids == ["echo", "exec", "hermes_plugin", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox"]
     exec_type = next(item for item in payload["runtime_types"] if item["id"] == "exec")
     assert exec_type["signals"]["activity"]
     assert exec_type["examples"]
+    plugin_type = next(item for item in payload["runtime_types"] if item["id"] == "hermes_plugin")
+    assert plugin_type["kind"] == "supervised_process"
+    assert plugin_type.get("deprecated") is not True
     hermes_type = next(item for item in payload["runtime_types"] if item["id"] == "hermes_sentinel")
     assert hermes_type["kind"] == "supervised_process"
+    assert hermes_type.get("deprecated") is True
     sentinel_type = next(item for item in payload["runtime_types"] if item["id"] == "sentinel_cli")
     assert sentinel_type["signals"]["tools"]
     channel_type = next(item for item in payload["runtime_types"] if item["id"] == "claude_code_channel")
@@ -3567,7 +3571,7 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             runtime_types = client.get("/api/runtime-types")
             assert runtime_types.status_code == 200
             runtime_payload = runtime_types.json()
-            assert runtime_payload["count"] == 6
+            assert runtime_payload["count"] == 7  # +hermes_plugin
             assert runtime_payload["runtime_types"][1]["id"] == "exec"
 
             templates = client.get("/api/templates")

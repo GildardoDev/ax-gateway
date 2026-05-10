@@ -101,13 +101,16 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
         },
         "hermes_sentinel": {
             "id": "hermes_sentinel",
-            "label": "Hermes Sentinel",
+            "label": "Hermes Sentinel (legacy)",
             "description": (
-                "Gateway-supervised long-running Hermes sentinel using the original "
-                "claude_agent_v2.py listener semantics."
+                "Legacy Gateway-supervised Hermes sentinel using the in-tree "
+                "claude_agent_v2.py listener semantics. New agents should use "
+                "hermes_plugin instead — this runtime is kept only so existing "
+                "entries continue to work until they are explicitly migrated."
             ),
             "kind": "supervised_process",
             "passive": False,
+            "deprecated": True,
             "requires": [],
             "form_fields": [
                 {
@@ -125,10 +128,10 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
             ],
             "examples": [
                 {
-                    "label": "Hermes dev sentinel",
+                    "label": "Hermes dev sentinel (legacy)",
                     "runtime_type": "hermes_sentinel",
                     "workdir": "/home/ax-agent/agents/dev_sentinel",
-                    "note": "Gateway starts the old listener once and monitors it; Hermes owns session continuity.",
+                    "note": "Legacy in-tree listener. Prefer hermes_plugin for new agents.",
                 },
             ],
             "signals": {
@@ -138,6 +141,50 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
                     "and tool activity signals as the pre-Gateway setup."
                 ),
                 "tools": "Tool telemetry comes from claude_agent_v2.py/Hermes callbacks, not a one-shot bridge.",
+            },
+        },
+        "hermes_plugin": {
+            "id": "hermes_plugin",
+            "label": "Hermes Plugin",
+            "description": (
+                "Gateway-supervised long-running Hermes process using the native "
+                "aX platform plugin at plugins/platforms/ax/. Gateway scaffolds the "
+                "agent's HERMES_HOME (plugin symlink + non-secret identity .env) "
+                "and spawns `hermes gateway run`; AX_TOKEN is injected at start from "
+                "the Gateway-owned token file and is never written to the workspace."
+            ),
+            "kind": "supervised_process",
+            "passive": False,
+            "requires": [],
+            "form_fields": [
+                {
+                    "name": "workdir",
+                    "label": "Workdir",
+                    "required": True,
+                    "placeholder": "/Users/jacob/claude_home/ax-wiki",
+                },
+            ],
+            "examples": [
+                {
+                    "label": "Wiki agent (Hermes plugin)",
+                    "runtime_type": "hermes_plugin",
+                    "workdir": "/Users/jacob/claude_home/ax-wiki",
+                    "note": (
+                        "Gateway launches `hermes gateway run` against HERMES_HOME=<workdir>/.hermes; "
+                        "the plugin connects to aX over SSE and replies via REST."
+                    ),
+                },
+            ],
+            "signals": {
+                **_shared_signals(),
+                "activity": (
+                    "Gateway reports process liveness; the plugin streams progress/tool events "
+                    "onto the original mention's activity stream so chat stays final-only."
+                ),
+                "tools": (
+                    "Tool telemetry comes from Hermes platform callbacks via the aX adapter "
+                    "(plugins/platforms/ax/adapter.py)."
+                ),
             },
         },
         "sentinel_cli": {
@@ -237,7 +284,7 @@ def runtime_type_definition(runtime_type: str) -> dict[str, Any]:
 
 def runtime_type_list() -> list[dict[str, Any]]:
     catalog = runtime_type_catalog()
-    ordered_ids = ["echo", "exec", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox"]
+    ordered_ids = ["echo", "exec", "hermes_plugin", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox"]
     return [catalog[runtime_id] for runtime_id in ordered_ids if runtime_id in catalog]
 
 
@@ -246,7 +293,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
     skill_path = _gateway_setup_skill_path()
     runtime_signals = {
         key: runtime_type_definition(key)["signals"]
-        for key in ("echo", "exec", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox")
+        for key in ("echo", "exec", "hermes_plugin", "hermes_sentinel", "sentinel_cli", "claude_code_channel", "inbox")
     }
     return {
         "echo_test": {
@@ -374,32 +421,36 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
         },
         "hermes": {
             "id": "hermes",
-            "label": "Hermes Sentinel",
-            "description": "Long-running Hermes coding sentinel managed by Gateway.",
+            "label": "Hermes",
+            "description": (
+                "Long-running Hermes agent managed by Gateway via the native aX "
+                "platform plugin (plugins/platforms/ax/). Gateway scaffolds "
+                "HERMES_HOME and supervises `hermes gateway run`."
+            ),
             "availability": "ready",
             "launchable": True,
-            "runtime_type": "hermes_sentinel",
+            "runtime_type": "hermes_plugin",
             "asset_class": "interactive_agent",
             "intake_model": "live_listener",
             "trigger_sources": ["direct_message"],
             "return_paths": ["inline_reply"],
             "telemetry_shape": "rich",
             "suggested_name": "hermes-bot",
-            "operator_summary": "Best path for a capable coding agent with continuity and rich progress.",
+            "operator_summary": "Best path for a capable Hermes-backed agent with continuity and rich progress, via the supported plugin path.",
             "recommended_test_message": "Remember the word cobalt, reply briefly, then I will ask you what word I gave you.",
             "what_you_need": [
-                "A local hermes-agent checkout, usually at ~/hermes-agent or via HERMES_REPO_PATH.",
-                "Hermes auth or model credentials such as ~/.hermes/auth.json or provider env vars.",
+                "A local hermes-agent install (hermes CLI on PATH, or HERMES_BIN env var, or ~/hermes-agent/.venv/bin/hermes).",
+                "Hermes provider credentials in ~/.hermes/auth.json (Gateway will symlink to <workdir>/.hermes if not already present).",
             ],
             "setup_skill": "gateway-agent-setup",
             "setup_skill_path": str(skill_path),
             "defaults": {
-                "runtime_type": "hermes_sentinel",
+                "runtime_type": "hermes_plugin",
                 "workdir": str(repo_root),
             },
-            "signals": runtime_signals["hermes_sentinel"],
+            "signals": runtime_signals["hermes_plugin"],
             "advanced": {
-                "adapter_label": "Gateway-supervised Hermes listener",
+                "adapter_label": "Gateway-supervised Hermes plugin",
                 "supports_command_override": False,
             },
         },

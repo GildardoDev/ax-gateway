@@ -976,7 +976,7 @@ def _normalize_runtime_type(runtime_type: str) -> str:
         return str(runtime_type_definition(runtime_type)["id"])
     except KeyError as exc:
         raise ValueError(
-            "Unsupported runtime type. Use echo, exec, hermes_sentinel, sentinel_cli, claude_code_channel, or inbox."
+            "Unsupported runtime type. Use echo, exec, hermes_plugin, hermes_sentinel, sentinel_cli, claude_code_channel, or inbox."
         ) from exc
 
 
@@ -8080,7 +8080,7 @@ def add_agent(
     runtime_type: str = typer.Option(
         None,
         "--type",
-        help="Advanced/internal runtime backend: echo | exec | hermes_sentinel | sentinel_cli | claude_code_channel | inbox",
+        help="Advanced/internal runtime backend: echo | exec | hermes_plugin | hermes_sentinel | sentinel_cli | claude_code_channel | inbox",
     ),
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),
@@ -8177,7 +8177,7 @@ def update_agent(
     runtime_type: str = typer.Option(
         None,
         "--type",
-        help="Advanced/internal runtime backend override: echo | exec | hermes_sentinel | sentinel_cli | claude_code_channel | inbox",
+        help="Advanced/internal runtime backend override: echo | exec | hermes_plugin | hermes_sentinel | sentinel_cli | claude_code_channel | inbox",
     ),
     exec_cmd: str = typer.Option(None, "--exec", help="Advanced override for exec-based templates"),
     workdir: str = typer.Option(None, "--workdir", help="Advanced working directory override"),

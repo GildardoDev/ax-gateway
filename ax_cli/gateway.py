@@ -426,6 +426,12 @@ def _template_operator_defaults(template_id: str | None, runtime_type: object) -
             "reply_mode": "interactive",
             "telemetry_level": "rich",
         },
+        "hermes_plugin": {
+            "placement": "hosted",
+            "activation": "persistent",
+            "reply_mode": "interactive",
+            "telemetry_level": "rich",
+        },
         "sentinel_cli": {
             "placement": "hosted",
             "activation": "persistent",
@@ -629,6 +635,7 @@ def _template_asset_defaults(template_id: str | None, runtime_type: object) -> d
             "constraints": [],
         },
         "hermes_sentinel": defaults_by_template["hermes"],
+        "hermes_plugin": defaults_by_template["hermes"],
         "sentinel_cli": defaults_by_template["sentinel_cli"],
         "inbox": defaults_by_template["inbox"],
     }
@@ -839,7 +846,7 @@ def _hermes_repo_candidates(entry: dict[str, Any] | None = None) -> list[Path]:
 def hermes_setup_status(entry: dict[str, Any]) -> dict[str, Any]:
     template_id = str(entry.get("template_id") or "").strip().lower()
     runtime_type = str(entry.get("runtime_type") or "").strip().lower()
-    if template_id != "hermes" and runtime_type != "hermes_sentinel":
+    if template_id != "hermes" and runtime_type not in {"hermes_sentinel", "hermes_plugin"}:
         return {"ready": True, "template_id": template_id}
 
     candidates = _hermes_repo_candidates(entry)
@@ -4059,6 +4066,22 @@ def _is_hermes_sentinel_runtime(runtime_type: object) -> bool:
     return str(runtime_type or "").strip().lower() in {"hermes_sentinel", "hermes_sdk"}
 
 
+def _is_hermes_plugin_runtime(runtime_type: object) -> bool:
+    return str(runtime_type or "").strip().lower() == "hermes_plugin"
+
+
+def _is_supervised_subprocess_runtime(runtime_type: object) -> bool:
+    """Runtimes Gateway supervises as a single long-running child process.
+
+    Both the legacy in-tree sentinel and the new Hermes plugin path fall
+    into this bucket: Gateway spawns the process, monitors liveness, and
+    tees stdout to a log file. The lifecycle helpers
+    (_start/_stop/_monitor) are runtime-specific; this predicate just lets
+    the shared start/stop scaffolding treat both the same.
+    """
+    return _is_hermes_sentinel_runtime(runtime_type) or _is_hermes_plugin_runtime(runtime_type)
+
+
 def _gateway_repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -4264,6 +4287,175 @@ def _build_hermes_sentinel_env(entry: dict[str, Any]) -> dict[str, str]:
     if env.get("PATH"):
         path_entries.append(env["PATH"])
     env["PATH"] = ":".join(path_entries)
+    return env
+
+
+# ---------------------------------------------------------------------------
+# Hermes plugin runtime (`runtime_type == "hermes_plugin"`)
+#
+# Gateway supervises a single long-running `hermes gateway run` process per
+# agent. The Hermes process discovers our aX platform plugin (linked into
+# HERMES_HOME/plugins/ax) and connects to aX over SSE; replies post via the
+# aX REST API. Gateway's job here is identity + supervision, not message
+# brokering. The bootstrap PAT never lives in the workspace — Gateway reads
+# the token from its owned token file at spawn time and exports it into the
+# child process's env only.
+# ---------------------------------------------------------------------------
+
+
+def _hermes_plugin_workdir(entry: dict[str, Any]) -> Path:
+    raw = str(entry.get("workdir") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path("/home/ax-agent/agents") / str(entry.get("name") or "agent")
+
+
+def _hermes_plugin_home(entry: dict[str, Any]) -> Path:
+    """Per-agent HERMES_HOME under the workdir. Workdir-as-home matches the
+    operator pattern that nova and ax-wiki already use, and keeps each
+    agent's memories/sessions/skills next to its workdir rather than under
+    a Gateway-owned location."""
+    configured = str(entry.get("hermes_home") or "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    return _hermes_plugin_workdir(entry) / ".hermes"
+
+
+def _hermes_bin(entry: dict[str, Any]) -> str:
+    """Resolve the hermes CLI.
+
+    Order:
+        1. Explicit operator override on the agent entry (`hermes_bin`).
+        2. ``HERMES_BIN`` env var on the Gateway process.
+        3. ``<HERMES_REPO_PATH>/.venv/bin/hermes`` if a repo path is configured.
+        4. ``~/hermes-agent/.venv/bin/hermes`` (the documented dev default).
+        5. ``hermes`` on $PATH (raises ``RuntimeError`` if not present).
+    """
+    configured = str(entry.get("hermes_bin") or "").strip()
+    if configured:
+        return configured
+    env_override = os.environ.get("HERMES_BIN", "").strip()
+    if env_override:
+        return env_override
+    hermes_repo = str(entry.get("hermes_repo_path") or "").strip()
+    if hermes_repo:
+        candidate = Path(hermes_repo).expanduser() / ".venv" / "bin" / "hermes"
+        if candidate.exists():
+            return str(candidate)
+    default = Path.home() / "hermes-agent" / ".venv" / "bin" / "hermes"
+    if default.exists():
+        return str(default)
+    found = shutil.which("hermes")
+    if found:
+        return found
+    raise RuntimeError(
+        "hermes CLI not found. Install hermes-agent, set HERMES_BIN, or set hermes_bin on the agent entry."
+    )
+
+
+def _plugin_source_dir() -> Path:
+    return _gateway_repo_root() / "plugins" / "platforms" / "ax"
+
+
+def _scaffold_hermes_plugin_home(entry: dict[str, Any]) -> Path:
+    """Make HERMES_HOME ready for ``hermes gateway run`` without writing
+    secrets to disk.
+
+    Idempotent. Creates the directory, links the aX platform plugin into
+    ``$HERMES_HOME/plugins/ax``, writes a non-secret ``.env`` with the
+    agent's identity, and (if missing) links the host's ``~/.hermes/auth.json``
+    and ``~/.hermes/config.yaml`` so the agent inherits the operator's
+    provider credentials. Operators who want per-agent provider creds can
+    delete the symlinks and provision their own files.
+    """
+    workdir = _hermes_plugin_workdir(entry)
+    workdir.mkdir(parents=True, exist_ok=True)
+    home = _hermes_plugin_home(entry)
+    home.mkdir(parents=True, exist_ok=True)
+    plugins_dir = home / "plugins"
+    plugins_dir.mkdir(parents=True, exist_ok=True)
+    plugin_link = plugins_dir / "ax"
+    plugin_source = _plugin_source_dir()
+    if not plugin_link.exists() and not plugin_link.is_symlink():
+        try:
+            plugin_link.symlink_to(plugin_source)
+        except OSError:
+            # Some filesystems disallow symlinks; fall back to a marker file
+            # so the operator gets a clear "go link this yourself" signal.
+            (plugins_dir / "ax.MISSING").write_text(
+                f"Could not symlink {plugin_source} → {plugin_link}. "
+                f"Link manually so `hermes plugins list` shows ax-platform.\n",
+                encoding="utf-8",
+            )
+    elif plugin_link.is_symlink():
+        # Refresh the symlink if it points at a stale source (e.g. repo moved).
+        try:
+            current_target = plugin_link.resolve()
+        except OSError:
+            current_target = None
+        if current_target != plugin_source.resolve():
+            try:
+                plugin_link.unlink()
+                plugin_link.symlink_to(plugin_source)
+            except OSError:
+                pass
+    # Non-secret identity .env so `hermes gateway run` can come up
+    # standalone (without Gateway env injection) for debugging. AX_TOKEN
+    # is deliberately omitted — it is injected via subprocess env only.
+    env_lines = [
+        "# Managed by ax gateway. Identity only; never AX_TOKEN.",
+        "# Gateway injects AX_TOKEN into the subprocess env from",
+        "# ~/.ax/gateway/agents/<name>/token (mode 600) at spawn time.",
+        f"AX_AGENT_NAME={entry.get('name') or ''}",
+        f"AX_AGENT_ID={entry.get('agent_id') or ''}",
+        f"AX_SPACE_ID={entry.get('space_id') or ''}",
+        f"AX_BASE_URL={entry.get('base_url') or 'https://paxai.app'}",
+        f"AX_HOME_CHANNEL={entry.get('home_channel_id') or entry.get('space_id') or ''}",
+    ]
+    (home / ".env").write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+    # Inherit provider creds from the operator's ~/.hermes/ unless the
+    # agent already has its own. Symlink, don't copy, so rotation in one
+    # place propagates everywhere.
+    operator_home = Path.home() / ".hermes"
+    for inherit in ("auth.json", "config.yaml"):
+        source = operator_home / inherit
+        target = home / inherit
+        if target.exists() or target.is_symlink():
+            continue
+        if not source.exists():
+            continue
+        try:
+            target.symlink_to(source)
+        except OSError:
+            pass
+    return home
+
+
+def _build_hermes_plugin_cmd(entry: dict[str, Any]) -> list[str]:
+    return [_hermes_bin(entry), "gateway", "run"]
+
+
+def _build_hermes_plugin_env(entry: dict[str, Any]) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in ENV_DENYLIST}
+    token = load_gateway_managed_agent_token(entry)
+    home = _hermes_plugin_home(entry)
+    env.update(
+        {
+            "AX_TOKEN": token,
+            "AX_BASE_URL": str(entry.get("base_url") or "https://paxai.app"),
+            "AX_AGENT_NAME": str(entry.get("name") or ""),
+            "AX_AGENT_ID": str(entry.get("agent_id") or ""),
+            "AX_SPACE_ID": str(entry.get("space_id") or ""),
+            "AX_HOME_CHANNEL": str(entry.get("home_channel_id") or entry.get("space_id") or ""),
+            "HERMES_HOME": str(home),
+        }
+    )
+    # Local Gateway URL so the adapter can post external-runtime announcements
+    # for roster activity (best-effort; the adapter silently no-ops if Gateway
+    # isn't reachable).
+    gateway_url = os.environ.get("AX_LOCAL_GATEWAY_URL") or os.environ.get("AX_GATEWAY_UI_URL")
+    if gateway_url:
+        env["AX_LOCAL_GATEWAY_URL"] = gateway_url
     return env
 
 
@@ -4617,7 +4809,7 @@ class ManagedAgentRuntime:
     def start(self) -> None:
         runtime_type = str(self.entry.get("runtime_type") or "").lower()
         if (
-            _is_hermes_sentinel_runtime(runtime_type)
+            _is_supervised_subprocess_runtime(runtime_type)
             and self._supervised_process is not None
             and self._supervised_process.poll() is None
         ):
@@ -4663,6 +4855,9 @@ class ManagedAgentRuntime:
         )
         if _is_hermes_sentinel_runtime(runtime_type):
             self._start_hermes_sentinel_process(runtime_instance_id=runtime_instance_id)
+            return
+        if _is_hermes_plugin_runtime(runtime_type):
+            self._start_hermes_plugin_process(runtime_instance_id=runtime_instance_id)
             return
         self._worker_thread = None
         if not _is_passive_runtime(self.entry.get("runtime_type")):
@@ -4983,6 +5178,10 @@ class ManagedAgentRuntime:
             return
 
     def _stop_hermes_sentinel_process(self, *, timeout: float = 5.0) -> None:
+        # Despite the name, this stop path is runtime-agnostic: it just SIGTERMs
+        # self._supervised_process. Both hermes_sentinel and hermes_plugin land
+        # here from stop(). The function early-returns when there is no
+        # supervised child, so it is safe to call for any runtime type.
         process = self._supervised_process
         self._supervised_process = None
         if process is None or process.poll() is not None:
@@ -5004,6 +5203,144 @@ class ManagedAgentRuntime:
                 process.wait(timeout=timeout)
             except Exception:
                 pass
+
+    # ----- hermes_plugin runtime (Gateway-supervised `hermes gateway run`) -----
+
+    def _hermes_plugin_log_path(self) -> Path:
+        configured = str(self.entry.get("log_path") or "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return _hermes_plugin_workdir(self.entry) / "gateway-hermes-plugin.log"
+
+    def _start_hermes_plugin_process(self, *, runtime_instance_id: str) -> None:
+        try:
+            hermes_bin_path = _hermes_bin(self.entry)
+        except RuntimeError as exc:
+            self._record_supervised_setup_error(str(exc))
+            return
+        try:
+            load_gateway_managed_agent_token(self.entry)
+        except ValueError as exc:
+            self._record_supervised_setup_error(str(exc))
+            return
+        try:
+            home = _scaffold_hermes_plugin_home(self.entry)
+        except OSError as exc:
+            self._record_supervised_setup_error(
+                f"Failed to scaffold HERMES_HOME ({_hermes_plugin_home(self.entry)}): {exc}"
+            )
+            return
+
+        workdir = _hermes_plugin_workdir(self.entry)
+        log_path = self._hermes_plugin_log_path()
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = _build_hermes_plugin_cmd(self.entry)
+        env = _build_hermes_plugin_env(self.entry)
+        try:
+            log_handle = log_path.open("a", encoding="utf-8")
+            log_handle.write(
+                f"\n[{_now_iso()}] Gateway starting Hermes plugin: "
+                f"{shlex.quote(hermes_bin_path)} gateway run "
+                f"(HERMES_HOME={home}, AX_AGENT_NAME={env.get('AX_AGENT_NAME')})\n"
+            )
+            log_handle.flush()
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                cwd=str(workdir),
+                env=env,
+                start_new_session=True,
+            )
+            self._sentinel_log_handle = log_handle
+            # Reuse the sentinel stdout consumer's tee-to-log behavior. The
+            # plugin doesn't emit AX_GATEWAY_EVENT lines (it posts activity
+            # directly to aX via the platform adapter), so the parser stays
+            # silent and only the log-tee side fires. If the plugin ever
+            # starts emitting those events, no change needed here.
+            self._sentinel_stdout_thread = threading.Thread(
+                target=self._consume_sentinel_stdout,
+                args=(process, log_handle),
+                daemon=True,
+                name=f"gw-hermes-plugin-stdout-{self.name}",
+            )
+            self._sentinel_stdout_thread.start()
+        except Exception as exc:
+            self._record_supervised_setup_error(f"Failed to start Hermes plugin: {str(exc)[:360]}")
+            return
+
+        self._supervised_process = process
+        self._update_state(
+            effective_state="running",
+            current_status=None,
+            current_activity="Hermes plugin runtime running",
+            current_tool=None,
+            current_tool_call_id=None,
+            last_error=None,
+            last_runtime_error_at=None,
+            last_connected_at=_now_iso(),
+            last_seen_at=_now_iso(),
+            reconnect_backoff_seconds=0,
+        )
+        self.entry["last_runtime_error_at"] = None
+        record_gateway_activity(
+            "runtime_started",
+            entry=self.entry,
+            runtime_instance_id=runtime_instance_id,
+            pid=process.pid,
+            log_path=str(log_path),
+            supervised_runtime="hermes_plugin",
+        )
+        self._supervised_thread = threading.Thread(
+            target=self._monitor_hermes_plugin_process,
+            daemon=True,
+            name=f"gw-hermes-plugin-{self.name}",
+        )
+        self._supervised_thread.start()
+        self._log(f"started hermes_plugin pid={process.pid}")
+
+    def _monitor_hermes_plugin_process(self) -> None:
+        process = self._supervised_process
+        if process is None:
+            return
+        while not self.stop_event.wait(timeout=5.0):
+            returncode = process.poll()
+            if returncode is None:
+                self._update_state(effective_state="running", last_seen_at=_now_iso(), last_error=None)
+                continue
+            status = "stopped" if returncode == 0 else "error"
+            error = None if returncode == 0 else f"Hermes plugin exited with code {returncode}"
+            self._update_state(
+                effective_state=status,
+                current_status=None if returncode == 0 else "error",
+                current_activity=None if returncode == 0 else error,
+                current_tool=None,
+                current_tool_call_id=None,
+                last_error=error,
+                last_seen_at=_now_iso(),
+            )
+            record_gateway_activity(
+                "runtime_exited",
+                entry=self.entry,
+                pid=process.pid,
+                exit_code=returncode,
+                error=error,
+            )
+            return
+
+    def _record_supervised_setup_error(self, error: str) -> None:
+        """Shared error path for supervised-subprocess runtimes."""
+        self._update_state(
+            effective_state="error",
+            current_status="error",
+            current_activity=error,
+            last_error=error,
+            last_runtime_error_at=_now_iso(),
+        )
+        self.entry["last_runtime_error_at"] = self._state.get("last_runtime_error_at")
+        record_gateway_activity("runtime_error", entry=self.entry, error=error)
 
     def _publish_processing_status(
         self,

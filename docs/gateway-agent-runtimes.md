@@ -44,8 +44,18 @@ Current useful modes:
 - `inbox`: queueing and manual acknowledgement paths for background workers.
 - `exec`: run probes or one-shot bridges that explicitly persist or reconstruct
   any state they need.
-- `hermes_sentinel`: Gateway-supervised long-running Hermes listener using the
-  old `claude_agent_v2.py --runtime hermes_sdk` behavior.
+- `hermes_plugin`: Gateway-supervised long-running `hermes gateway run`
+  process using the native aX platform plugin at `plugins/platforms/ax/`.
+  Preferred path for all new Hermes agents. Gateway scaffolds
+  `<workdir>/.hermes` (plugin symlink + non-secret identity `.env`), spawns
+  the hermes binary, and injects `AX_TOKEN` from the Gateway-owned token
+  file at start so the raw PAT never lives in the workspace. The `hermes`
+  template defaults to this runtime.
+- `hermes_sentinel` *(legacy)*: Gateway-supervised long-running Hermes
+  listener using the old `claude_agent_v2.py --runtime hermes_sdk`
+  behavior. Kept only so existing entries keep working; new agents should
+  use `hermes_plugin`. Migrate with
+  `ax gateway agents update <name> --type hermes_plugin`.
 - `claude_code_channel`: attached Claude Code channel. Gateway registers the
   identity and token; `ax-channel` delivers live mentions into the Claude Code
   session.

@@ -136,8 +136,32 @@ approvals:
 
 ## Run
 
-Always launch from the agent's workdir so the process inherits the
-right cwd even if `terminal.cwd` is wrong:
+Two paths, pick one:
+
+### Gateway-supervised (preferred)
+
+Register the agent with the `hermes` template and let Gateway own the
+lifecycle. Gateway scaffolds `<workdir>/.hermes` (plugin symlink + non-secret
+identity `.env`), spawns `hermes gateway run`, and injects `AX_TOKEN` from
+the Gateway-owned token file at process start so the raw PAT never lives
+in the workspace.
+
+```bash
+ax gateway agents add @wiki-bot \
+  --template hermes \
+  --space <space-id-or-slug> \
+  --workdir ~/hermes-agents/wiki-bot
+ax gateway agents start @wiki-bot
+```
+
+`ax gateway agents stop @wiki-bot` shuts down the supervised hermes
+process cleanly. Gateway's runtime row shows liveness; the Hermes-side
+plugin posts activity/replies directly to aX.
+
+### Manual (for development / debugging the plugin itself)
+
+Launch `hermes gateway run` yourself from the agent's workdir. Useful
+when you are iterating on the adapter or want to attach a debugger:
 
 ```bash
 cd ~/hermes-agents/nova
@@ -182,7 +206,7 @@ Use one short live pass before calling a setup good:
 | Default working area | `terminal.cwd` + launch from workdir | **Soft.** Bash defaults to the workdir; `pwd` returns it. Absolute paths still work. |
 | Dangerous-command gate | `approvals.mode: on` (default) | **Real boundary.** Hermes prompts the operator (in chat, via aX) before running anything classified dangerous. See `~/hermes-agent/SECURITY.md` §2. |
 | Output redaction | `agent/redact.py` | API keys / tokens are scrubbed before reaching display layer. |
-| Per-agent home dir | `HERMES_HOME` set per agent (Gateway path) | Hermes memory/sessions don't cross agents on the same host. |
+| Per-agent home dir | `HERMES_HOME=<workdir>/.hermes` set automatically by Gateway when the agent uses the `hermes_plugin` runtime | Hermes memory/sessions don't cross agents on the same host. |
 
 ### Not yet enforced (the open questions)
 
