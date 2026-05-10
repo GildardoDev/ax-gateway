@@ -22,6 +22,11 @@ def create(
         "--bound-agent-id",
         help="Bind the new PAT to this agent UUID (inherits allowed-spaces; use for agent runtime tokens)",
     ),
+    audience: Optional[str] = typer.Option(
+        None,
+        "--audience",
+        help="Token audience: cli, mcp, or both (only meaningful with --bound-agent-id)",
+    ),
     as_json: bool = JSON_OPTION,
 ):
     """Create a new API key."""
@@ -31,6 +36,7 @@ def create(
             name,
             allowed_agent_ids=agent_id or None,
             bound_agent_id=bound_agent_id,
+            audience=audience,
         )
     except httpx.HTTPStatusError as e:
         handle_error(e)

@@ -11,7 +11,7 @@ def test_keys_create_passes_bound_agent_id(monkeypatch):
     captured = {}
 
     class FakeClient:
-        def create_key(self, name, *, allowed_agent_ids=None, bound_agent_id=None):
+        def create_key(self, name, *, allowed_agent_ids=None, bound_agent_id=None, audience=None):
             captured["name"] = name
             captured["allowed_agent_ids"] = allowed_agent_ids
             captured["bound_agent_id"] = bound_agent_id
@@ -39,7 +39,7 @@ def test_keys_create_passes_scope_and_bound_agent_id(monkeypatch):
     captured = {}
 
     class FakeClient:
-        def create_key(self, name, *, allowed_agent_ids=None, bound_agent_id=None):
+        def create_key(self, name, *, allowed_agent_ids=None, bound_agent_id=None, audience=None):
             captured["allowed_agent_ids"] = allowed_agent_ids
             captured["bound_agent_id"] = bound_agent_id
             return {"credential_id": "c2"}
