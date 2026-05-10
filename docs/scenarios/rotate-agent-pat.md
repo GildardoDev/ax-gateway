@@ -44,20 +44,22 @@ revoke it.
    `axctl credentials audit --strict` to make policy violations fail loudly.
 
 2. **Mint the replacement.** Match the audience and expiry of the old
-   token. Save to a new path so the old token file is untouched.
+   token. Save to a separate directory so the old token file is untouched.
 
    ```bash
    axctl token mint <agent> \
        --audience <cli|mcp|both> \
        --expires <days> \
-       --save-to <new-token-file> \
+       --save-to <new-token-dir> \
        --profile <new-profile> \
        --no-print-token
    ```
 
-   `--no-print-token` keeps the secret out of your shell history. The
-   command writes the token to `<new-token-file>` with mode `0600` and
-   registers `<new-profile>` against it.
+   `--save-to` takes a directory (typically the agent's `.ax/` directory,
+   e.g. `/home/agent/.ax`); the token file and `config.toml` are written
+   inside it. `--no-print-token` keeps the secret out of your shell
+   history. The token file is mode `0600`, and `<new-profile>` is
+   registered against it.
 
 3. **Verify the new profile.**
 
@@ -102,6 +104,6 @@ After the rotation:
 |---|---|---|
 | Agent fails right after step 4. | Revoked the old credential before the new one was actually serving traffic. | Re-run step 2 to mint another replacement, verify, then revoke. The originally-revoked id stays revoked. |
 | `credentials list` shows 3+ active PATs for the agent. | A previous rotation aborted between mint and revoke. | Stop. Identify each `credential_id`, decide which is current, and revoke the rest before issuing more. More than two active PATs per agent is a security hygiene issue. |
-| `profile verify` fails on the new profile. | Token file moved, host/workdir changed since `axctl token mint` ran, or the file was tampered with. | Inspect `<new-token-file>` permissions and contents. If intentional (e.g. rotated to a new host), re-run `axctl profile add` from the new location. |
+| `profile verify` fails on the new profile. | Token file moved, host/workdir changed since `axctl token mint` ran, or the file was tampered with. | Inspect the token file inside `<new-token-dir>` (permissions and contents). If intentional (e.g. rotated to a new host), re-run `axctl profile add` from the new location. |
 | `auth whoami` returns the user, not the agent. | Wrong audience minted, or the new profile isn't active yet. | Check that step 2 used the same audience as the old PAT, and that `axctl profile use <new-profile>` (or the appropriate env vars) selected the agent profile. |
 | Honeypot / fingerprint alert fires during step 3. | The new token was used from a different machine or workspace than where it was minted. | Treat as a security event, not a rotation problem. See [`docs/credential-security.md`](../credential-security.md). |
