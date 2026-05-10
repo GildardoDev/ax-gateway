@@ -7598,6 +7598,169 @@ def test_send_from_managed_agent_inbox_returns_empty_when_no_unread(monkeypatch,
     assert payload["inbox"]["unread_count"] == 0
 
 
+# --- Slug-aware --space coverage (aX task 39f4de3f) -------------------------
+
+
+def test_resolve_space_via_cache_passes_uuid_through_unchanged():
+    uuid_in = "12345678-1234-4234-8234-123456789012"
+    assert gateway_cmd._resolve_space_via_cache(uuid_in) == uuid_in
+
+
+def test_resolve_space_via_cache_resolves_slug_via_cache(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [
+            {"id": "12345678-1234-4234-8234-123456789012", "name": "ax-cli-dev", "slug": "ax-cli-dev"},
+            {"id": "abcdef01-2345-4234-8234-123456789012", "name": "Other", "slug": "other"},
+        ]
+    )
+
+    assert gateway_cmd._resolve_space_via_cache("ax-cli-dev") == "12345678-1234-4234-8234-123456789012"
+
+
+def test_resolve_space_via_cache_returns_none_for_unknown_slug(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache([])
+
+    assert gateway_cmd._resolve_space_via_cache("never-seen") is None
+
+
+def test_resolve_space_via_cache_returns_none_for_empty_input():
+    assert gateway_cmd._resolve_space_via_cache(None) is None
+    assert gateway_cmd._resolve_space_via_cache("") is None
+    assert gateway_cmd._resolve_space_via_cache("   ") is None
+
+
+def test_local_send_resolves_slug_before_proxying(monkeypatch, tmp_path):
+    """`ax gateway local send --space <slug>` resolves through the cache and
+    forwards a UUID to the daemon, so the upstream API never sees the slug."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [{"id": "12345678-1234-4234-8234-123456789012", "name": "ax-cli-dev", "slug": "ax-cli-dev"}]
+    )
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return _FakeHttpResponse({"agent": "codex-pass-through", "message": {"id": "msg-1"}})
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        return _FakeHttpResponse({"agent": "codex-pass-through", "messages": [], "count": 0})
+
+    def fake_resolve_session(**kwargs):
+        captured["session_space_id"] = kwargs.get("space_id")
+        return ("axgw_s_test.session", {"status": "approved"})
+
+    monkeypatch.setattr(gateway_cmd, "_resolve_local_gateway_session", fake_resolve_session)
+    monkeypatch.setattr(gateway_cmd, "_check_local_pending_replies", lambda **_: {"count": 0, "message_ids": []})
+    monkeypatch.setattr(gateway_cmd.httpx, "post", fake_post)
+    monkeypatch.setattr(gateway_cmd.httpx, "get", fake_get)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "send", "hello", "--space", "ax-cli-dev", "--no-inbox", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["json"]["space_id"] == "12345678-1234-4234-8234-123456789012"
+    assert captured["session_space_id"] == "12345678-1234-4234-8234-123456789012"
+
+
+def test_local_send_unknown_slug_errors_with_actionable_hint(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache([])
+
+    monkeypatch.setattr(
+        gateway_cmd,
+        "_resolve_local_gateway_session",
+        lambda **kwargs: pytest.fail("session must not be opened when slug fails to resolve"),
+    )
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "send", "hello", "--space", "never-seen", "--no-inbox"],
+    )
+
+    assert result.exit_code != 0
+    assert "Could not resolve space" in result.output
+    assert "ax spaces list" in result.output
+
+
+def test_local_inbox_resolves_slug_before_proxying(monkeypatch, tmp_path):
+    """Same slug → UUID resolution applies to ax gateway local inbox."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_space_cache(
+        [{"id": "12345678-1234-4234-8234-123456789012", "name": "ax-cli-dev", "slug": "ax-cli-dev"}]
+    )
+    captured = {}
+
+    def fake_resolve_session(**kwargs):
+        captured["session_space_id"] = kwargs.get("space_id")
+        return ("axgw_s_test.session", None)
+
+    def fake_poll(**kwargs):
+        captured["poll_space_id"] = kwargs.get("space_id")
+        return {"agent": "codex-pass-through", "messages": []}
+
+    monkeypatch.setattr(gateway_cmd, "_resolve_local_gateway_session", fake_resolve_session)
+    monkeypatch.setattr(gateway_cmd, "_poll_local_inbox_over_http", fake_poll)
+
+    result = runner.invoke(
+        app,
+        ["gateway", "local", "inbox", "--space", "ax-cli-dev", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["session_space_id"] == "12345678-1234-4234-8234-123456789012"
+    assert captured["poll_space_id"] == "12345678-1234-4234-8234-123456789012"
+
+
+def test_agents_inbox_resolves_slug_before_lookup(monkeypatch, tmp_path):
+    """`ax gateway agents inbox --space <slug>` also resolves through the cache."""
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_space_cache(
+        [{"id": "space-1", "name": "Test Space", "slug": "test-space"}]
+    )
+    monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
+    captured = {}
+
+    real_inbox = gateway_cmd._inbox_for_managed_agent
+
+    def spy_inbox(*, name, limit, channel, space_id, unread_only, mark_read):
+        captured["space_id"] = space_id
+        return real_inbox(
+            name=name, limit=limit, channel=channel, space_id=space_id,
+            unread_only=unread_only, mark_read=mark_read,
+        )
+
+    monkeypatch.setattr(gateway_cmd, "_inbox_for_managed_agent", spy_inbox)
+
+    result = runner.invoke(
+        app, ["gateway", "agents", "inbox", "cli_god", "--space", "test-space", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["space_id"] == "space-1"
+
+
+def test_agents_inbox_unknown_slug_errors_clearly(monkeypatch, tmp_path):
+    _seed_managed_inbox_agent(tmp_path, monkeypatch)
+    gateway_core.save_space_cache([])
+
+    result = runner.invoke(
+        app, ["gateway", "agents", "inbox", "cli_god", "--space", "never-seen"]
+    )
+
+    assert result.exit_code != 0
+    assert "Could not resolve space" in result.output
+
+
 def test_inbox_for_managed_agent_clears_pending_queue_on_mark_read(monkeypatch, tmp_path):
     """`ax gateway agents inbox <name> --mark-read` must clear the local
     pending queue so backlog_depth/queue_depth go to 0. Without this fix
