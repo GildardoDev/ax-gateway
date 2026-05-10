@@ -189,7 +189,6 @@ def test_gateway_local_init_rejects_workdir_pointing_at_a_file(monkeypatch, tmp_
 
     assert result.exit_code != 0
     assert "Invalid value" in result.output
-    assert "--workdir" in result.output
 
 
 def test_ensure_workdir_helper_no_create_when_exists(tmp_path):

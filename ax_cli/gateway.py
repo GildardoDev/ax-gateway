@@ -5992,6 +5992,22 @@ class GatewayDaemon:
                         "Gateway is waiting for a fresh external runtime heartbeat before routing work."
                     )
             return
+        if desired_state == "stopped":
+            if runtime is not None:
+                runtime.stop()
+                self._runtimes.pop(name, None)
+            entry.update(
+                {
+                    "effective_state": "stopped",
+                    "runtime_instance_id": None,
+                    "current_status": None,
+                    "current_activity": None,
+                    "current_tool": None,
+                    "current_tool_call_id": None,
+                    "backlog_depth": 0,
+                }
+            )
+            return
         hermes_status = hermes_setup_status(entry)
         if not hermes_status.get("ready", True):
             if runtime is not None:
