@@ -154,6 +154,10 @@ def login_user(
         console.print(f"  {k} = {v}")
 
     console.print("\n[cyan]You're ready.[/cyan] Try: ax auth whoami")
+    console.print(
+        "[dim]Note: PAT-based login is the current bootstrap path. "
+        "Gateway-brokered OAuth login is on the roadmap as the preferred alternative.[/dim]"
+    )
 
 
 def _probe_credential(effective: dict) -> dict:
