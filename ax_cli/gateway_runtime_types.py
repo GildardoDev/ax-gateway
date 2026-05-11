@@ -149,9 +149,11 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
             "description": (
                 "Gateway-supervised long-running Hermes process using the native "
                 "aX platform plugin at ax_cli/plugins/platforms/ax/. Gateway scaffolds the "
-                "agent's HERMES_HOME (plugin symlink + non-secret identity .env) "
-                "and spawns `hermes gateway run`; AX_TOKEN is injected at start from "
-                "the Gateway-owned token file and is never written to the workspace."
+                "agent's HERMES_HOME (plugin symlink + non-secret identity .env + per-agent "
+                "config.yaml with `plugins.enabled: [ax-platform]` so Hermes' opt-in plugin "
+                "gate doesn't silently drop the adapter) and spawns `hermes gateway run`; "
+                "AX_TOKEN is injected at start from the Gateway-owned token file and is "
+                "never written to the workspace."
             ),
             "kind": "supervised_process",
             "passive": False,

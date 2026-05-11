@@ -251,6 +251,25 @@ disconnect, and posts a shutdown notice to the home channel.
 
 ## Troubleshooting
 
+**`No messaging platforms enabled` in `~/.hermes/logs/gateway.log` and the
+agent stays silent forever (Plugin opt-in gate)**
+→ Hermes' plugin system is opt-in by default — discovered user plugins are
+gated behind a `plugins.enabled` allowlist in `~/.hermes/config.yaml`. The
+runtime cleanly comes up, `hermes plugins list` shows `ax-platform` as
+`not enabled`, and `gateway agents show <name>` reports the runtime as
+running, but no replies ever land.
+
+Gateway-supervised `hermes_plugin` agents self-enable `ax-platform` in
+their per-agent `$HERMES_HOME/config.yaml` automatically — `gateway agents
+show <name>` exposes this via the `ax_platform_enabled` doctor check.
+If you're running `hermes gateway run` manually against `~/.hermes/`, add
+the entry yourself:
+```yaml
+plugins:
+  enabled:
+    - ax-platform
+```
+
 **`Plugin 'ax-platform' has no register() function`**
 → The plugin's `__init__.py` must re-export `register` from `adapter`:
 ```python
