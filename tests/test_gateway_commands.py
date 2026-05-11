@@ -7291,7 +7291,13 @@ def _make_429_error() -> httpx.HTTPStatusError:
 
 
 def test_with_upstream_429_retry_succeeds_on_second_attempt(monkeypatch):
-    """Helper retries on 429 and returns the success result of the next call."""
+    """Helper retries on 429 and returns the success result of the next call.
+
+    Wait honors ``Retry-After: 12`` from the server response rather than the
+    1s exponential-backoff default — paxai.app's per-user bucket needs the
+    full server-advertised cooldown before the retry has any chance of
+    succeeding.
+    """
     sleeps: list[float] = []
     monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
     calls = {"n": 0}
@@ -7305,7 +7311,7 @@ def test_with_upstream_429_retry_succeeds_on_second_attempt(monkeypatch):
     result = gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
     assert result == {"agent": "ok"}
     assert calls["n"] == 2
-    assert sleeps == [1.0]  # one backoff before the successful retry
+    assert sleeps == [12.0]  # max(exp=1.0, retry_after=12)
 
 
 def test_with_upstream_429_retry_exhausts_then_raises(monkeypatch):
@@ -7322,8 +7328,54 @@ def test_with_upstream_429_retry_exhausts_then_raises(monkeypatch):
         gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
     assert exc_info.value.retries_attempted == 2
     assert exc_info.value.retry_after_seconds == 12  # parsed from header
-    # 2 retries × exponential = 1s + 2s.
-    assert sleeps == [1.0, 2.0]
+    # Both retries honor Retry-After: 12 (max of exp backoff 1s/2s and 12s hint).
+    assert sleeps == [12.0, 12.0]
+
+
+def test_with_upstream_429_retry_falls_back_to_exp_backoff_without_retry_after(monkeypatch):
+    """If the server omits Retry-After, fall back to the exponential
+    backoff schedule. Preserves prior behavior for non-conforming responses.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
+
+    request = httpx.Request("POST", "https://paxai.app/api/v1/agents")
+    no_hint = httpx.HTTPStatusError(
+        "429",
+        request=request,
+        response=httpx.Response(429, request=request),  # no Retry-After header
+    )
+
+    def call():
+        raise no_hint
+
+    with pytest.raises(gateway_cmd.UpstreamRateLimitedError):
+        gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0)
+    assert sleeps == [1.0, 2.0]  # exp backoff: 1*2^0, 1*2^1
+
+
+def test_with_upstream_429_retry_caps_wait_at_max(monkeypatch):
+    """Pathological Retry-After values are capped at ``max_wait`` so a
+    misbehaving server can't hang the CLI for hours.
+    """
+    sleeps: list[float] = []
+    monkeypatch.setattr(gateway_cmd.time, "sleep", lambda s: sleeps.append(s))
+
+    request = httpx.Request("POST", "https://paxai.app/api/v1/agents")
+    insane = httpx.HTTPStatusError(
+        "429",
+        request=request,
+        response=httpx.Response(429, headers={"retry-after": "999999"}, request=request),
+    )
+
+    def call():
+        raise insane
+
+    with pytest.raises(gateway_cmd.UpstreamRateLimitedError):
+        gateway_cmd._with_upstream_429_retry(
+            call, max_retries=2, base_wait=1.0, max_wait=30.0
+        )
+    assert sleeps == [30.0, 30.0]  # both capped at max_wait
 
 
 def test_with_upstream_429_retry_propagates_other_errors(monkeypatch):

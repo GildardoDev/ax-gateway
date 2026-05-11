@@ -229,14 +229,25 @@ class UpstreamRateLimitedError(RuntimeError):
         super().__init__(f"Upstream rate-limited after {retries_attempted} retries")
 
 
-def _with_upstream_429_retry(call, *, max_retries: int, base_wait: float = 1.0):
-    """Run ``call`` and retry on httpx 429 with exponential backoff.
+def _with_upstream_429_retry(
+    call,
+    *,
+    max_retries: int,
+    base_wait: float = 1.0,
+    max_wait: float = 120.0,
+):
+    """Run ``call`` and retry on httpx 429, honoring ``Retry-After`` when present.
 
-    Waits ``base_wait * 2**attempt`` between attempts. Other httpx
-    exceptions (4xx/5xx that aren't 429, network errors) propagate
+    Per-attempt wait = ``max(base_wait * 2**attempt, retry_after_seconds)``,
+    capped at ``max_wait``. paxai.app sends ``Retry-After: <seconds>`` on its
+    per-user rate-limit responses; ignoring it and falling back to a 1s/2s
+    exponential backoff exhausts the retry budget far below the server's
+    cooldown and surfaces as a spurious ``UpstreamRateLimitedError``.
+
+    Other httpx exceptions (4xx/5xx that aren't 429, network errors) propagate
     immediately. After the configured retry budget is exhausted on a
     persistent 429, raises ``UpstreamRateLimitedError`` carrying the
-    final exception and any Retry-After hint.
+    final exception.
     """
     attempts = 0
     while True:
@@ -247,7 +258,13 @@ def _with_upstream_429_retry(call, *, max_retries: int, base_wait: float = 1.0):
                 raise
             if attempts >= max_retries:
                 raise UpstreamRateLimitedError(exc, attempts) from exc
-            wait = base_wait * (2**attempts)
+            retry_after_raw = exc.response.headers.get("retry-after")
+            try:
+                hint = float(retry_after_raw) if retry_after_raw is not None else 0.0
+            except (TypeError, ValueError):
+                hint = 0.0
+            exp = base_wait * (2**attempts)
+            wait = min(max(exp, hint), max_wait)
             time.sleep(wait)
             attempts += 1
 
