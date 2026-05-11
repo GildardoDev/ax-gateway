@@ -22,8 +22,8 @@ Gateway keeps those pieces, but moves operator management into one place:
 - Show liveness, queue state, activity, and tool signals.
 - Provide a single CLI/UI for dev, staging, and production operators.
 
-Use separate Gateway state per environment. `AX_GATEWAY_ENV=dev/staging` stores
-state under `~/.ax/gateway/envs/dev-staging`, while `AX_GATEWAY_ENV=prod`
+Use separate Gateway state per environment. `AX_GATEWAY_ENV=dev` stores
+state under `~/.ax/gateway/envs/dev`, while `AX_GATEWAY_ENV=prod`
 stores a separate registry, session, PID file, UI state, queues, and agent token
 files. `AX_GATEWAY_DIR=/path/to/gateway-state` is available when a deployment
 needs an explicit state root.

@@ -224,7 +224,7 @@ transcript.
 
 - [ ] Command shape (§3.1) reviewed and agreed by team
 - [ ] Envelope (§3.2) publishable as a JSON schema / TS types
-- [ ] `ax tasks send` and `ax alerts send` implemented on dev/staging
+- [ ] `ax tasks send` and `ax alerts send` implemented on main
 - [ ] Outgoing message has exactly **one** transcript object (not a pair)
 - [ ] Receiver's frontend renders one card with task/alert context + Open button
 - [ ] Delivery receipts stream per SEND-RECEIPTS-001
