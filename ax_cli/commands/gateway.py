@@ -43,10 +43,13 @@ from ..commands.bootstrap import (
 )
 from ..config import resolve_space_id, resolve_user_base_url, resolve_user_token
 from ..gateway import (
+    AX_PLUGIN_NAME,
     GatewayDaemon,
     _format_daemon_log_line,
+    _hermes_plugin_home,
     _is_passive_runtime,
     _is_system_agent,
+    _plugin_source_dir,
     active_gateway_pid,
     active_gateway_pids,
     active_gateway_ui_pid,
@@ -3579,6 +3582,92 @@ def _run_gateway_doctor(name: str, *, send_test: bool = False) -> dict:
             else:
                 add_check("ollama_model", "warning", "No Ollama model is selected yet.")
         add_check("launch_path", "passed", "Gateway can launch the Ollama bridge on send.")
+
+    runtime_type = str(entry.get("runtime_type") or "").strip().lower()
+    if runtime_type == "hermes_plugin":
+        # Two distinct failure modes silently break the Hermes plugin path,
+        # and each presents identically (agent shows running, no replies).
+        # Surface them as separate checks so the operator can tell which
+        # broke without source-diving.
+        try:
+            hermes_home = _hermes_plugin_home(entry)
+            plugin_link = hermes_home / "plugins" / "ax"
+            plugin_source = _plugin_source_dir()
+            if plugin_link.is_symlink() and plugin_link.resolve() == plugin_source.resolve():
+                add_check(
+                    "ax_platform_symlink",
+                    "passed",
+                    f"{plugin_link} → {plugin_source} (Hermes can load the aX adapter).",
+                )
+            elif plugin_link.exists():
+                add_check(
+                    "ax_platform_symlink",
+                    "warning",
+                    f"{plugin_link} exists but does not resolve to {plugin_source}. "
+                    f"Delete it; Gateway will re-link on the next start.",
+                )
+            else:
+                add_check(
+                    "ax_platform_symlink",
+                    "failed",
+                    f"{plugin_link} is missing. Run `ax gateway agents start {entry.get('name') or '<name>'}` "
+                    f"to trigger the scaffold.",
+                )
+        except Exception as exc:
+            add_check("ax_platform_symlink", "warning", f"Could not inspect plugin symlink: {exc}")
+
+        try:
+            hermes_home = _hermes_plugin_home(entry)
+            cfg_path = hermes_home / "config.yaml"
+            if cfg_path.exists():
+                import yaml as _yaml  # local — gateway import cost
+
+                try:
+                    loaded = _yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    loaded = None
+                    parse_error = exc
+                else:
+                    parse_error = None
+                if not isinstance(loaded, dict):
+                    if parse_error is not None:
+                        add_check(
+                            "ax_platform_enabled",
+                            "failed",
+                            f"{cfg_path} did not parse as YAML: {parse_error}",
+                        )
+                    else:
+                        add_check(
+                            "ax_platform_enabled",
+                            "failed",
+                            f"{cfg_path} is not a YAML mapping.",
+                        )
+                else:
+                    plugins_cfg = loaded.get("plugins")
+                    enabled_list = plugins_cfg.get("enabled") if isinstance(plugins_cfg, dict) else None
+                    if isinstance(enabled_list, list) and AX_PLUGIN_NAME in enabled_list:
+                        add_check(
+                            "ax_platform_enabled",
+                            "passed",
+                            f"`plugins.enabled` contains `{AX_PLUGIN_NAME}` (Hermes will load the adapter).",
+                        )
+                    else:
+                        add_check(
+                            "ax_platform_enabled",
+                            "failed",
+                            f"`plugins.enabled` in {cfg_path} does not contain `{AX_PLUGIN_NAME}`. "
+                            f"Hermes is opt-in for user plugins; without this the runtime comes up "
+                            f"but logs `No messaging platforms enabled` and never replies.",
+                        )
+            else:
+                add_check(
+                    "ax_platform_enabled",
+                    "failed",
+                    f"{cfg_path} is missing. Run `ax gateway agents start {entry.get('name') or '<name>'}` "
+                    f"to trigger the scaffold.",
+                )
+        except Exception as exc:
+            add_check("ax_platform_enabled", "warning", f"Could not inspect per-agent config.yaml: {exc}")
 
     if str(snapshot.get("mode") or "") == "LIVE":
         if str(snapshot.get("presence") or "") == "IDLE":

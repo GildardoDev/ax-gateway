@@ -209,7 +209,105 @@ def test_scaffold_renders_minimal_config_when_operator_has_none(tmp_path, monkey
 
     assert cfg_path.is_file() and not cfg_path.is_symlink()
     rendered = yaml.safe_load(cfg_path.read_text())
-    assert rendered == {"terminal": {"cwd": str(tmp_path / "wiki")}}
+    # Scaffold always pins terminal.cwd and enables the ax-platform plugin —
+    # without the latter Hermes' opt-in gate silently drops the adapter.
+    assert rendered == {
+        "terminal": {"cwd": str(tmp_path / "wiki")},
+        "plugins": {"enabled": [gateway_core.AX_PLUGIN_NAME]},
+    }
+
+
+def test_scaffold_enables_ax_platform_when_operator_config_has_no_plugins_key(tmp_path, monkeypatch):
+    """Operator config without a `plugins` section gets one created with
+    `enabled: [ax-platform]`. Otherwise fresh setups would hit Hermes'
+    silent `No messaging platforms enabled` failure mode.
+    """
+    yaml = pytest.importorskip("yaml")
+    fake_home = tmp_path / "operator-home"
+    operator_hermes = fake_home / ".hermes"
+    operator_hermes.mkdir(parents=True)
+    (operator_hermes / "config.yaml").write_text(yaml.safe_dump({"model": "gpt-5.5"}))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    entry = _base_entry(tmp_path)
+    home = gateway_core._scaffold_hermes_plugin_home(entry)
+    rendered = yaml.safe_load((home / "config.yaml").read_text())
+    assert rendered["plugins"]["enabled"] == [gateway_core.AX_PLUGIN_NAME]
+    assert rendered["model"] == "gpt-5.5"
+
+
+def test_scaffold_appends_ax_platform_alongside_existing_enabled_plugins(tmp_path, monkeypatch):
+    """Operator already has other plugins enabled — scaffold must append
+    ax-platform without dropping the existing entries.
+    """
+    yaml = pytest.importorskip("yaml")
+    fake_home = tmp_path / "operator-home"
+    operator_hermes = fake_home / ".hermes"
+    operator_hermes.mkdir(parents=True)
+    (operator_hermes / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"enabled": ["disk-cleanup", "spotify"]}})
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    entry = _base_entry(tmp_path)
+    home = gateway_core._scaffold_hermes_plugin_home(entry)
+    rendered = yaml.safe_load((home / "config.yaml").read_text())
+    assert set(rendered["plugins"]["enabled"]) == {
+        "disk-cleanup",
+        "spotify",
+        gateway_core.AX_PLUGIN_NAME,
+    }
+
+
+def test_scaffold_does_not_duplicate_ax_platform_when_already_enabled(tmp_path, monkeypatch):
+    """Idempotent: running the scaffold twice (or against a config that
+    already enables ax-platform) does not produce duplicate entries.
+    """
+    yaml = pytest.importorskip("yaml")
+    fake_home = tmp_path / "operator-home"
+    operator_hermes = fake_home / ".hermes"
+    operator_hermes.mkdir(parents=True)
+    (operator_hermes / "config.yaml").write_text(
+        yaml.safe_dump({"plugins": {"enabled": [gateway_core.AX_PLUGIN_NAME]}})
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    entry = _base_entry(tmp_path)
+    gateway_core._scaffold_hermes_plugin_home(entry)
+    # Second scaffold against the previously-rendered per-agent config.
+    home = gateway_core._scaffold_hermes_plugin_home(entry)
+    rendered = yaml.safe_load((home / "config.yaml").read_text())
+    assert rendered["plugins"]["enabled"].count(gateway_core.AX_PLUGIN_NAME) == 1
+
+
+def test_scaffold_scrubs_stale_disable_of_ax_platform(tmp_path, monkeypatch):
+    """If the operator's `plugins.disabled` lists ax-platform, the
+    scaffold removes it — a stale disable would override the enable and
+    re-create the silent-drop failure mode.
+    """
+    yaml = pytest.importorskip("yaml")
+    fake_home = tmp_path / "operator-home"
+    operator_hermes = fake_home / ".hermes"
+    operator_hermes.mkdir(parents=True)
+    (operator_hermes / "config.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "plugins": {
+                    "enabled": ["disk-cleanup"],
+                    "disabled": [gateway_core.AX_PLUGIN_NAME, "google_meet"],
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    entry = _base_entry(tmp_path)
+    home = gateway_core._scaffold_hermes_plugin_home(entry)
+    rendered = yaml.safe_load((home / "config.yaml").read_text())
+    assert gateway_core.AX_PLUGIN_NAME in rendered["plugins"]["enabled"]
+    assert gateway_core.AX_PLUGIN_NAME not in rendered["plugins"].get("disabled", [])
+    # Unrelated disables stay put.
+    assert "google_meet" in rendered["plugins"]["disabled"]
 
 
 def test_hermes_setup_status_does_not_gate_plugin_runtime(tmp_path, monkeypatch):

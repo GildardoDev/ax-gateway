@@ -4362,6 +4362,12 @@ def _hermes_bin(entry: dict[str, Any]) -> str:
     )
 
 
+# Canonical name of the aX platform plugin as published in ``plugin.yaml``.
+# Used by the scaffold (to enable it in per-agent ``config.yaml``) and the
+# doctor (to verify the same name shows up in ``plugins.enabled``).
+AX_PLUGIN_NAME = "ax-platform"
+
+
 def _plugin_source_dir() -> Path:
     """Resolve the aX platform plugin directory shipped with ``ax_cli``.
 
@@ -4473,12 +4479,30 @@ def _scaffold_hermes_plugin_home(entry: dict[str, Any]) -> Path:
 
 def _render_hermes_plugin_config_yaml(entry: dict[str, Any], *, home: Path, operator_home: Path) -> None:
     """Write ``$HERMES_HOME/config.yaml`` with ``terminal.cwd`` pinned to the
-    agent's workdir, seeded from the operator's ``~/.hermes/config.yaml``.
+    agent's workdir AND the aX platform plugin enabled, seeded from the
+    operator's ``~/.hermes/config.yaml``.
+
+    Hermes' plugin system is opt-in by default — discovered user plugins
+    are gated behind a ``plugins.enabled`` allowlist
+    (``hermes_cli/plugins.py``: "Plugins are opt-in by default — only
+    plugins whose name appears in this set are loaded"). Without this
+    block the runtime cleanly comes up, ``hermes plugins list`` shows
+    ``ax-platform`` as ``not enabled``, the bound platform never reaches
+    ``self.config.platforms``, and ``hermes gateway run`` logs the
+    silent-but-fatal ``No messaging platforms enabled`` — agent stays
+    silent forever with no error visible in ``gateway agents show``.
+    Pinning ``plugins.enabled`` here means every ``hermes_plugin`` agent
+    self-enables ``ax-platform`` on the next start without the operator
+    needing to learn the gate exists.
+
+    ``plugins.disabled`` (if present) is scrubbed of ``ax-platform`` so a
+    stale operator-level disable can't override our enable. Other plugin
+    names in both lists are left untouched.
 
     Writes via a temp file + atomic replace so a partial write can't leave
-    Hermes booting against a half-yaml. Any non-mapping ``terminal`` value
-    in the operator config is replaced with a fresh mapping so we never
-    silently keep a bogus structure.
+    Hermes booting against a half-yaml. Any non-mapping ``terminal`` or
+    ``plugins`` value in the operator config is replaced with a fresh
+    mapping so we never silently keep a bogus structure.
     """
     workdir = _hermes_plugin_workdir(entry)
     target = home / "config.yaml"
@@ -4498,6 +4522,20 @@ def _render_hermes_plugin_config_yaml(entry: dict[str, Any], *, home: Path, oper
         terminal_cfg = {}
     terminal_cfg["cwd"] = str(workdir)
     cfg["terminal"] = terminal_cfg
+
+    plugins_cfg = cfg.get("plugins")
+    if not isinstance(plugins_cfg, dict):
+        plugins_cfg = {}
+    enabled = plugins_cfg.get("enabled")
+    if not isinstance(enabled, list):
+        enabled = []
+    if AX_PLUGIN_NAME not in enabled:
+        enabled.append(AX_PLUGIN_NAME)
+    plugins_cfg["enabled"] = enabled
+    disabled = plugins_cfg.get("disabled")
+    if isinstance(disabled, list) and AX_PLUGIN_NAME in disabled:
+        plugins_cfg["disabled"] = [name for name in disabled if name != AX_PLUGIN_NAME]
+    cfg["plugins"] = plugins_cfg
     try:
         import yaml
 
