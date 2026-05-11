@@ -658,10 +658,7 @@ def check_requirements() -> bool:
 def is_connected() -> bool:
     """Coarse env-only check used by gateway status before adapter init."""
     return bool(
-        os.getenv("AX_TOKEN")
-        and os.getenv("AX_SPACE_ID")
-        and os.getenv("AX_AGENT_NAME")
-        and os.getenv("AX_AGENT_ID")
+        os.getenv("AX_TOKEN") and os.getenv("AX_SPACE_ID") and os.getenv("AX_AGENT_NAME") and os.getenv("AX_AGENT_ID")
     )
 
 

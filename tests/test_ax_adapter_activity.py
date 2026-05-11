@@ -6,7 +6,7 @@ import pytest
 
 _SPEC = importlib.util.spec_from_file_location(
     "ax_adapter_for_test",
-    Path(__file__).resolve().parents[1] / "plugins" / "platforms" / "ax" / "adapter.py",
+    Path(__file__).resolve().parents[1] / "ax_cli" / "plugins" / "platforms" / "ax" / "adapter.py",
 )
 assert _SPEC and _SPEC.loader
 _MODULE = importlib.util.module_from_spec(_SPEC)

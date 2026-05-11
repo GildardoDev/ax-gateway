@@ -4363,7 +4363,19 @@ def _hermes_bin(entry: dict[str, Any]) -> str:
 
 
 def _plugin_source_dir() -> Path:
-    return _gateway_repo_root() / "plugins" / "platforms" / "ax"
+    """Resolve the aX platform plugin directory shipped with ``ax_cli``.
+
+    The plugin lives at ``ax_cli/plugins/platforms/ax/`` so it ships inside
+    the wheel — the prior ``<repo>/plugins/...`` layout only worked for
+    editable installs because ``[tool.setuptools.packages.find]`` is
+    ``include=["ax_cli*"]`` and never picked up the top-level ``plugins/``
+    tree. After this change Gateway can resolve the plugin source from any
+    installed ``ax_cli`` (wheel, sdist, or editable) without scaffolding a
+    dangling symlink into ``~/.hermes/plugins/ax``.
+    """
+    import ax_cli as _ax_cli_pkg
+
+    return Path(_ax_cli_pkg.__file__).resolve().parent / "plugins" / "platforms" / "ax"
 
 
 def _scaffold_hermes_plugin_home(entry: dict[str, Any]) -> Path:

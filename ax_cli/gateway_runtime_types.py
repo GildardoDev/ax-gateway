@@ -148,7 +148,7 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
             "label": "Hermes Plugin",
             "description": (
                 "Gateway-supervised long-running Hermes process using the native "
-                "aX platform plugin at plugins/platforms/ax/. Gateway scaffolds the "
+                "aX platform plugin at ax_cli/plugins/platforms/ax/. Gateway scaffolds the "
                 "agent's HERMES_HOME (plugin symlink + non-secret identity .env) "
                 "and spawns `hermes gateway run`; AX_TOKEN is injected at start from "
                 "the Gateway-owned token file and is never written to the workspace."
@@ -183,7 +183,7 @@ def runtime_type_catalog() -> dict[str, dict[str, Any]]:
                 ),
                 "tools": (
                     "Tool telemetry comes from Hermes platform callbacks via the aX adapter "
-                    "(plugins/platforms/ax/adapter.py)."
+                    "(ax_cli/plugins/platforms/ax/adapter.py)."
                 ),
             },
         },
@@ -424,7 +424,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "label": "Hermes",
             "description": (
                 "Long-running Hermes agent managed by Gateway via the native aX "
-                "platform plugin (plugins/platforms/ax/). Gateway scaffolds "
+                "platform plugin (ax_cli/plugins/platforms/ax/). Gateway scaffolds "
                 "HERMES_HOME and supervises `hermes gateway run`."
             ),
             "availability": "ready",

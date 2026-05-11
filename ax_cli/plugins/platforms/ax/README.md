@@ -34,11 +34,14 @@ AUTH-SPEC-001 §13. PAT never touches business endpoints.
 
 ## Install (local development)
 
-The plugin lives in this repo at `plugins/platforms/ax/`. To make Hermes
-discover it without forking hermes-agent:
+The plugin lives in this repo at `ax_cli/plugins/platforms/ax/` and ships
+inside the `axctl` wheel — Gateway scaffolds `~/.hermes/plugins/ax`
+automatically when an agent is registered with the `hermes_plugin`
+runtime. For ad-hoc discovery without Gateway (e.g. running `hermes`
+directly against this checkout), point Hermes at the source tree:
 
 ```bash
-ln -s "$(pwd)/plugins/platforms/ax" ~/.hermes/plugins/ax
+ln -s "$(pwd)/ax_cli/plugins/platforms/ax" ~/.hermes/plugins/ax
 ```
 
 Then verify discovery:
