@@ -1,11 +1,11 @@
-"""ax auth doctor --probe and invalid_credential recovery copy.
+"""ax auth doctor probe and invalid_credential recovery copy.
 
 Static doctor cannot tell the difference between "config layout consistent"
-and "credential is alive". A `--probe` flag opt-in runs the matching
-/auth/exchange so doctor can report dead credentials honestly. On rejection,
-both the doctor probe path and the generic httpx error handler emit the same
-recovery one-liner pointing at `axctl login --url <host>` so operators have a
-clear next step.
+and "credential is alive". By default doctor calls /auth/exchange to verify
+the configured PAT is alive. Use --no-probe to skip the network check.
+On rejection, both the doctor probe path and the generic httpx error handler
+emit the same recovery one-liner pointing at `axctl login --url <host>` so
+operators have a clear next step.
 
 Strict no-token-printing: even if the backend echoes the PAT in an error body,
 or the request URL carries a query-string secret, no `axp_*` substring may
@@ -145,20 +145,32 @@ def test_doctor_probe_never_prints_token(tmp_path, monkeypatch, isolated_global)
     assert "axp_a_VerySecretKey" not in result.output
 
 
-def test_doctor_without_probe_makes_no_http_call(tmp_path, monkeypatch, isolated_global):
+def test_doctor_no_probe_flag_skips_network(tmp_path, monkeypatch, isolated_global):
     _write_local_agent_pat_config(tmp_path)
     monkeypatch.chdir(tmp_path)
-    called = {"count": 0}
 
     def boom(*args, **kwargs):
-        called["count"] += 1
-        raise AssertionError("doctor without --probe must not hit the network")
+        raise AssertionError("--no-probe must not hit the network")
 
     monkeypatch.setattr(httpx, "post", boom)
 
+    result = runner.invoke(app, ["auth", "doctor", "--no-probe", "--json"])
+    assert result.exit_code == 0, result.output
+
+
+def test_doctor_probes_by_default(tmp_path, monkeypatch, isolated_global):
+    _write_local_agent_pat_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    _mock_exchange_response(
+        monkeypatch,
+        status_code=200,
+        payload={"access_token": "header.payload.sig", "expires_in": 900, "token_type": "bearer"},
+    )
+
     result = runner.invoke(app, ["auth", "doctor", "--json"])
     assert result.exit_code == 0, result.output
-    assert called["count"] == 0
+    data = json.loads(result.output)
+    assert data.get("probe", {}).get("ok") is True
 
 
 def test_doctor_probe_skipped_for_gateway_managed_config(tmp_path, monkeypatch, isolated_global):
@@ -206,7 +218,7 @@ def test_handle_error_invalid_credential_emits_doctor_hint(capsys):
 
     captured = capsys.readouterr()
     combined = (captured.err + captured.out).lower()
-    assert "axctl auth doctor --probe" in combined or "axctl login" in combined
+    assert "axctl auth doctor" in combined or "axctl login" in combined
 
 
 def test_handle_error_redacts_pat_substrings_in_body(capsys):

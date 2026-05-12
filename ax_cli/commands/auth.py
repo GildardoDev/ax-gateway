@@ -235,13 +235,13 @@ def doctor(
     ),
     space_id: str = typer.Option(None, "--space-id", help="Show this explicit space override in the resolution"),
     probe: bool = typer.Option(
-        False,
+        True,
         "--probe/--no-probe",
-        help="Also call /auth/exchange to verify the configured PAT is alive (off by default)",
+        help="Call /auth/exchange to verify the configured PAT is alive (use --no-probe to skip)",
     ),
     as_json: bool = JSON_OPTION,
 ):
-    """Explain effective auth/config resolution; with --probe, also verify the PAT is alive."""
+    """Explain effective auth/config resolution and verify the PAT is alive; use --no-probe to skip the network check."""
     data = diagnose_auth_config(env_name=env_name, explicit_space_id=space_id)
     effective = data["effective"]
 

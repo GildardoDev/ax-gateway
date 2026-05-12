@@ -98,7 +98,7 @@ def handle_error(e: httpx.HTTPStatusError):
         url_hint = f"https://{host}" if host else "<your-host>"
         typer.echo(
             "  Recovery: token rejected — likely from a different environment. "
-            f"Run `axctl auth doctor --probe` to confirm, then `axctl login --url {url_hint}`.",
+            f"Run `axctl auth doctor` to confirm, then `axctl login --url {url_hint}`.",
             err=True,
         )
     raise typer.Exit(1)

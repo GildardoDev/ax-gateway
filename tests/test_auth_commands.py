@@ -252,7 +252,7 @@ def test_auth_doctor_json_outputs_diagnostics(monkeypatch):
         },
     )
 
-    result = runner.invoke(app, ["auth", "doctor", "--env", "dev", "--space-id", "space-1", "--json"])
+    result = runner.invoke(app, ["auth", "doctor", "--env", "dev", "--space-id", "space-1", "--no-probe", "--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
