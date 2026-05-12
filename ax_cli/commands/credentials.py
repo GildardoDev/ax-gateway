@@ -295,7 +295,7 @@ def list_credentials(as_json: bool = JSON_OPTION):
                 agent = agent[:12] + "..."
             days = _days_until_expiry(c.get("expires_at"))
             expiry_str = f"  expires={days}d" if days is not None else ""
-            expiry_color = " [yellow]⚠[/yellow]" if days is not None and days < _EXPIRY_WARNING_DAYS else ""
+            expiry_color = " [yellow]⚠[/yellow]" if days is not None and days <= _EXPIRY_WARNING_DAYS else ""
             console.print(
                 f"  [{color}]{state:<10s}[/{color}] {c['key_id']}  agent={agent:<16s}  {c.get('name', '')}{expiry_str}{expiry_color}"
             )

@@ -1,3 +1,4 @@
+import datetime
 import json
 
 from typer.testing import CliRunner
@@ -8,13 +9,18 @@ from ax_cli.main import app
 runner = CliRunner()
 
 
+def _expires_in(days: int) -> str:
+    dt = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=days)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _credential(
     agent_id: str,
     credential_id: str,
     *,
     state: str = "active",
     created_at: str = "2026-04-15T00:00:00Z",
-    expires_at: str = "2027-01-01T00:00:00Z",
+    expires_at: str | None = None,
 ):
     return {
         "credential_id": credential_id,
@@ -24,7 +30,7 @@ def _credential(
         "audience": "both",
         "lifecycle_state": state,
         "created_at": created_at,
-        "expires_at": expires_at,
+        "expires_at": expires_at or _expires_in(90),
         "last_used_at": None,
     }
 
@@ -108,24 +114,28 @@ def test_build_credential_audit_flags_expiring_soon():
     report = build_credential_audit(
         [
             _credential("agent-ok", "ok-1"),
-            _credential("agent-expiring", "exp-1", expires_at="2026-05-15T00:00:00Z"),
-            _credential("agent-boundary", "boundary-1", expires_at="2026-05-26T00:00:00Z"),
+            _credential("agent-expiring", "exp-1", expires_at=_expires_in(5)),
+            _credential(
+                "agent-boundary", "boundary-1", expires_at=_expires_in(15)
+            ),  # ~14 computed days — boundary included
+            _credential("agent-safe", "safe-1", expires_at=_expires_in(16)),  # ~15 computed days — outside window
         ]
     )
     by_agent = {a["agent_id"]: a for a in report["agents"]}
     assert not by_agent["agent-ok"]["expiring_soon"]
+    assert not by_agent["agent-safe"]["expiring_soon"]
     assert by_agent["agent-expiring"]["expiring_soon"]
-    assert by_agent["agent-boundary"]["expiring_soon"]  # exactly 14 days — included
+    assert by_agent["agent-boundary"]["expiring_soon"]
     assert by_agent["agent-expiring"]["severity"] == "warning"
     assert "rotate" in by_agent["agent-expiring"]["recommendation"]
     assert report["summary"]["expiring_soon"] == 2
-    assert report["summary"]["ok"] == 1
+    assert report["summary"]["ok"] == 2
 
 
 def test_credentials_audit_strict_fails_for_expiring_soon(monkeypatch):
     class ExpiringClient:
         def mgmt_list_credentials(self):
-            return [_credential("agent-expiring", "exp-1", expires_at="2026-05-15T00:00:00Z")]
+            return [_credential("agent-expiring", "exp-1", expires_at=_expires_in(5))]
 
     monkeypatch.setattr("ax_cli.commands.credentials.get_client", lambda: ExpiringClient())
 
@@ -138,10 +148,26 @@ def test_credentials_audit_strict_fails_for_expiring_soon(monkeypatch):
 def test_credentials_audit_expiring_soon_shown_in_human_output(monkeypatch):
     class ExpiringClient:
         def mgmt_list_credentials(self):
-            return [_credential("agent-expiring", "exp-1", expires_at="2026-05-15T00:00:00Z")]
+            return [_credential("agent-expiring", "exp-1", expires_at=_expires_in(5))]
 
     monkeypatch.setattr("ax_cli.commands.credentials.get_client", lambda: ExpiringClient())
 
     result = runner.invoke(app, ["credentials", "audit"])
     assert result.exit_code == 0, result.output
     assert "expiring_soon=1" in result.output
+
+
+def test_credentials_list_shows_expiry_and_warns_when_close(monkeypatch):
+    class FakeClient:
+        def mgmt_list_credentials(self):
+            return [
+                _credential("agent-a", "cred-safe", expires_at=_expires_in(60)),
+                _credential("agent-b", "cred-warn", expires_at=_expires_in(5)),
+            ]
+
+    monkeypatch.setattr("ax_cli.commands.credentials.get_client", lambda: FakeClient())
+
+    result = runner.invoke(app, ["credentials", "list"])
+    assert result.exit_code == 0, result.output
+    assert "expires=" in result.output
+    assert "⚠" in result.output
