@@ -4,11 +4,26 @@ Requires a user PAT (axp_u_) which exchanges for user_admin JWT.
 All operations are API-first — same as what the UI does.
 """
 
+import datetime
+
 import httpx
 import typer
 
 from ..config import get_client
 from ..output import EXIT_NOT_OK, JSON_OPTION, console, handle_error, print_json, print_table
+
+_EXPIRY_WARNING_DAYS = 14
+
+
+def _days_until_expiry(expires_at: str | None) -> int | None:
+    if not expires_at:
+        return None
+    try:
+        exp = datetime.datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        return (exp - datetime.datetime.now(datetime.timezone.utc)).days
+    except (ValueError, TypeError):
+        return None
+
 
 app = typer.Typer(name="credentials", help="Credential management (PATs, enrollment tokens)", no_args_is_help=True)
 
@@ -44,12 +59,23 @@ def build_credential_audit(credentials: list[dict]) -> dict:
             severity = "violation"
             recommendation = "revoke stale PATs before minting another token"
 
+        days_each = [_days_until_expiry(c.get("expires_at")) for c in active]
+        days_each = [d for d in days_each if d is not None]
+        expiry_days_min = min(days_each) if days_each else None
+        expiring_soon = expiry_days_min is not None and expiry_days_min < _EXPIRY_WARNING_DAYS
+
+        if expiring_soon and severity == "ok":
+            severity = "warning"
+            recommendation = f"PAT expires in {expiry_days_min}d — rotate before it expires"
+
         agents.append(
             {
                 "agent_id": agent_id,
                 "active_count": count,
                 "status": status,
                 "severity": severity,
+                "expiring_soon": expiring_soon,
+                "expiry_days_min": expiry_days_min,
                 "recommendation": recommendation,
                 "credentials": [
                     {
@@ -68,15 +94,17 @@ def build_credential_audit(credentials: list[dict]) -> dict:
 
     summary = {
         "agents_checked": len(agents),
-        "ok": sum(1 for agent in agents if agent["status"] == "ok"),
-        "rotation_windows": sum(1 for agent in agents if agent["status"] == "rotation_window"),
-        "cleanup_required": sum(1 for agent in agents if agent["status"] == "cleanup_required"),
+        "ok": sum(1 for a in agents if a["status"] == "ok" and not a["expiring_soon"]),
+        "expiring_soon": sum(1 for a in agents if a["expiring_soon"]),
+        "rotation_windows": sum(1 for a in agents if a["status"] == "rotation_window"),
+        "cleanup_required": sum(1 for a in agents if a["status"] == "cleanup_required"),
     }
     return {
         "policy": {
             "normal_active_agent_pats": 1,
             "rotation_window_active_agent_pats": 2,
             "max_active_agent_pats": 2,
+            "expiry_warning_days": _EXPIRY_WARNING_DAYS,
         },
         "summary": summary,
         "agents": agents,
@@ -214,27 +242,29 @@ def audit(
         summary = report["summary"]
         console.print(
             "[bold]Agent PAT audit[/bold] "
-            f"ok={summary['ok']} rotation_windows={summary['rotation_windows']} "
+            f"ok={summary['ok']} expiring_soon={summary['expiring_soon']} "
+            f"rotation_windows={summary['rotation_windows']} "
             f"cleanup_required={summary['cleanup_required']}"
         )
         if not report["agents"]:
             console.print("[dim]No active agent-bound PATs found.[/dim]")
         else:
             print_table(
-                ["Agent", "Active", "Status", "Recommendation"],
+                ["Agent", "Active", "Expires In", "Status", "Recommendation"],
                 [
                     {
                         "agent": agent["agent_id"],
                         "active": agent["active_count"],
-                        "status": agent["status"],
+                        "expires_in": f"{agent['expiry_days_min']}d" if agent["expiry_days_min"] is not None else "—",
+                        "status": agent["status"] + (" ⚠" if agent["expiring_soon"] else ""),
                         "recommendation": agent["recommendation"],
                     }
                     for agent in report["agents"]
                 ],
-                keys=["agent", "active", "status", "recommendation"],
+                keys=["agent", "active", "expires_in", "status", "recommendation"],
             )
 
-    if strict and report["summary"]["cleanup_required"]:
+    if strict and (report["summary"]["cleanup_required"] or report["summary"]["expiring_soon"]):
         raise typer.Exit(EXIT_NOT_OK)
 
 
@@ -259,4 +289,9 @@ def list_credentials(as_json: bool = JSON_OPTION):
             agent = c.get("bound_agent_id") or "none"
             if agent != "none":
                 agent = agent[:12] + "..."
-            console.print(f"  [{color}]{state:<10s}[/{color}] {c['key_id']}  agent={agent:<16s}  {c.get('name', '')}")
+            days = _days_until_expiry(c.get("expires_at"))
+            expiry_str = f"  expires={days}d" if days is not None else ""
+            expiry_color = " [yellow]⚠[/yellow]" if days is not None and days < _EXPIRY_WARNING_DAYS else ""
+            console.print(
+                f"  [{color}]{state:<10s}[/{color}] {c['key_id']}  agent={agent:<16s}  {c.get('name', '')}{expiry_str}{expiry_color}"
+            )
