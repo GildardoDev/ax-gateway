@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Optional
 
 import httpx
 import typer
@@ -234,10 +235,10 @@ def doctor(
         help="Diagnose a named user-login environment created with `axctl login --env`",
     ),
     space_id: str = typer.Option(None, "--space-id", help="Show this explicit space override in the resolution"),
-    probe: bool = typer.Option(
-        True,
+    probe: Optional[bool] = typer.Option(
+        None,
         "--probe/--no-probe",
-        help="Call /auth/exchange to verify the configured PAT is alive (use --no-probe to skip)",
+        help="Call /auth/exchange to verify the configured PAT is alive. Default: on unless --env is specified.",
     ),
     as_json: bool = JSON_OPTION,
 ):
@@ -245,7 +246,11 @@ def doctor(
     data = diagnose_auth_config(env_name=env_name, explicit_space_id=space_id)
     effective = data["effective"]
 
-    if probe:
+    # Default: probe when diagnosing the active environment.
+    # Skip automatically for --env to avoid validating the wrong token via resolve_token().
+    should_probe = probe if probe is not None else (env_name is None)
+
+    if should_probe:
         probe_result = _probe_credential(effective)
         data["probe"] = probe_result
         if probe_result.get("ok") is False:
@@ -317,7 +322,7 @@ def doctor(
             console.print(f"[yellow]warning:[/yellow] {warning['code']} - {warning.get('reason')}")
         for problem in data.get("problems", []):
             console.print(f"[red]problem:[/red] {problem['code']} - {problem.get('reason')}")
-        if probe:
+        if should_probe:
             probe_result = data.get("probe") or {}
             if probe_result.get("ok") is True:
                 console.print(f"[green]probe:[/green] /auth/exchange ok ({probe_result.get('token_class')})")

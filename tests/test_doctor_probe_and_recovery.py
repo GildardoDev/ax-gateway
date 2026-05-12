@@ -173,6 +173,41 @@ def test_doctor_probes_by_default(tmp_path, monkeypatch, isolated_global):
     assert data.get("probe", {}).get("ok") is True
 
 
+def test_doctor_skips_probe_for_env_flag_by_default(tmp_path, monkeypatch, isolated_global):
+    """--env without explicit --probe must not probe — resolve_token() reads the wrong token."""
+    _write_local_agent_pat_config(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("--env without --probe must not hit the network")
+
+    monkeypatch.setattr(httpx, "post", boom)
+    monkeypatch.setattr(
+        "ax_cli.commands.auth.diagnose_auth_config",
+        lambda *, env_name, explicit_space_id: {
+            "ok": True,
+            "effective": {
+                "auth_source": "user_login:dev",
+                "token_kind": "user_pat",
+                "token": "axp_u_...cret",
+                "base_url": "https://dev.paxai.app",
+                "base_url_source": "user_login:dev",
+                "host": "dev.paxai.app",
+                "space_id": None,
+                "space_source": None,
+                "principal_intent": "user",
+            },
+            "sources": [],
+            "warnings": [],
+            "problems": [],
+        },
+    )
+
+    result = runner.invoke(app, ["auth", "doctor", "--env", "dev", "--json"])
+    assert result.exit_code == 0, result.output
+    assert "probe" not in json.loads(result.output)
+
+
 def test_doctor_probe_skipped_for_gateway_managed_config(tmp_path, monkeypatch, isolated_global):
     """Gateway-brokered shape has no PAT to probe; doctor must skip cleanly."""
     local_ax = tmp_path / ".ax"
