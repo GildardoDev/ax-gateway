@@ -109,14 +109,16 @@ def test_build_credential_audit_flags_expiring_soon():
         [
             _credential("agent-ok", "ok-1"),
             _credential("agent-expiring", "exp-1", expires_at="2026-05-15T00:00:00Z"),
+            _credential("agent-boundary", "boundary-1", expires_at="2026-05-26T00:00:00Z"),
         ]
     )
     by_agent = {a["agent_id"]: a for a in report["agents"]}
     assert not by_agent["agent-ok"]["expiring_soon"]
     assert by_agent["agent-expiring"]["expiring_soon"]
+    assert by_agent["agent-boundary"]["expiring_soon"]  # exactly 14 days — included
     assert by_agent["agent-expiring"]["severity"] == "warning"
     assert "rotate" in by_agent["agent-expiring"]["recommendation"]
-    assert report["summary"]["expiring_soon"] == 1
+    assert report["summary"]["expiring_soon"] == 2
     assert report["summary"]["ok"] == 1
 
 

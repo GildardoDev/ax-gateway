@@ -62,7 +62,7 @@ def build_credential_audit(credentials: list[dict]) -> dict:
         days_each = [_days_until_expiry(c.get("expires_at")) for c in active]
         days_each = [d for d in days_each if d is not None]
         expiry_days_min = min(days_each) if days_each else None
-        expiring_soon = expiry_days_min is not None and expiry_days_min < _EXPIRY_WARNING_DAYS
+        expiring_soon = expiry_days_min is not None and expiry_days_min <= _EXPIRY_WARNING_DAYS
 
         if expiring_soon and severity == "ok":
             severity = "warning"
@@ -226,7 +226,11 @@ def revoke(
 @app.command("audit")
 def audit(
     as_json: bool = JSON_OPTION,
-    strict: bool = typer.Option(False, "--strict", help="Exit non-zero when any agent has more than two active PATs"),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Exit non-zero when any agent has more than two active PATs or a PAT expiring within 14 days",
+    ),
 ):
     """Audit active agent PAT counts without minting or revoking credentials."""
     client = get_client()
