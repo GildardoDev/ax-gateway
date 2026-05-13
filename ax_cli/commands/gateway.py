@@ -1325,7 +1325,7 @@ def _register_managed_agent(
             qualifier=bedrock_qualifier,
             payload_key=bedrock_payload_key,
             aws_profile=aws_profile,
-            template_id=template_effective_id or "bedrock_agentcore",
+            template_id=template_effective_id,
         )
     if template_effective_id in {"hermes", "sentinel_cli", "claude_code_channel"} and not explicit_workdir:
         raise ValueError(
@@ -1822,14 +1822,14 @@ def _update_managed_agent(
         entry["ollama_model"] = ollama_model_effective
     else:
         entry.pop("ollama_model", None)
+    bedrock_flags = {
+        "bedrock_runtime_arn": bedrock_runtime_arn,
+        "bedrock_region": bedrock_region,
+        "bedrock_qualifier": bedrock_qualifier,
+        "bedrock_payload_key": bedrock_payload_key,
+        "aws_profile": aws_profile,
+    }
     if template_effective_id == "bedrock_agentcore":
-        bedrock_flags = {
-            "bedrock_runtime_arn": bedrock_runtime_arn,
-            "bedrock_region": bedrock_region,
-            "bedrock_qualifier": bedrock_qualifier,
-            "bedrock_payload_key": bedrock_payload_key,
-            "aws_profile": aws_profile,
-        }
         if template is not None or any(v is not _UNSET for v in bedrock_flags.values()):
             normalized_bedrock = _validate_bedrock_options(
                 runtime_arn=bedrock_runtime_arn
@@ -1847,6 +1847,8 @@ def _update_managed_agent(
             )
             entry.update(normalized_bedrock)
     else:
+        if any(v is not _UNSET for v in bedrock_flags.values()):
+            raise ValueError("--bedrock-* flags are only valid with --template bedrock_agentcore.")
         for _k in ("bedrock_runtime_arn", "bedrock_region", "bedrock_qualifier", "bedrock_payload_key", "aws_profile"):
             entry.pop(_k, None)
     entry["updated_at"] = datetime.now(timezone.utc).isoformat()

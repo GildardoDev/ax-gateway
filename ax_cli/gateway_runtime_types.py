@@ -451,8 +451,7 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
             "setup_skill_path": str(skill_path),
             "defaults": {
                 "runtime_type": "exec",
-                "exec_command": "python3 examples/gateway_bedrock_agentcore/bedrock_agentcore_bridge.py",
-                "workdir": str(repo_root),
+                "exec_command": "python3 -m ax_cli.bridges.bedrock_agentcore_bridge",
             },
             "signals": runtime_signals["exec"],
             "advanced": {

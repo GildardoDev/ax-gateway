@@ -28,10 +28,8 @@ from ax_cli.gateway_runtime_types import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-BRIDGE_PATH = REPO_ROOT / "examples" / "gateway_bedrock_agentcore" / "bedrock_agentcore_bridge.py"
 
-sys.path.insert(0, str(BRIDGE_PATH.parent))
-import bedrock_agentcore_bridge as bridge  # noqa: E402, I001
+import ax_cli.bridges.bedrock_agentcore_bridge as bridge  # noqa: E402, I001
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +52,7 @@ def test_bedrock_agentcore_template_is_registered():
 def test_bedrock_agentcore_template_exec_command_points_at_bridge():
     t = agent_template_definition("bedrock_agentcore")
     cmd = str((t.get("defaults") or {}).get("exec_command") or "")
-    assert "examples/gateway_bedrock_agentcore/bedrock_agentcore_bridge.py" in cmd
+    assert "ax_cli.bridges.bedrock_agentcore_bridge" in cmd
 
 
 def test_bedrock_agentcore_template_listed_after_strands():
@@ -64,7 +62,8 @@ def test_bedrock_agentcore_template_listed_after_strands():
 
 
 def test_bedrock_agentcore_bridge_file_exists():
-    assert BRIDGE_PATH.exists()
+    bridge_path = REPO_ROOT / "ax_cli" / "bridges" / "bedrock_agentcore_bridge.py"
+    assert bridge_path.exists()
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +172,20 @@ def test_validate_bedrock_flag_with_wrong_template_raises():
             payload_key=None,
             aws_profile=None,
             template_id="ollama",
+        )
+
+
+def test_validate_bedrock_flag_with_empty_template_raises():
+    # Passing bedrock flags without selecting any template must be rejected.
+    # An empty template_id must not silently pass as "bedrock_agentcore".
+    with pytest.raises(ValueError, match="only valid with --template bedrock_agentcore"):
+        bridge.validate_bedrock_options(
+            runtime_arn=VALID_ARN,
+            region=None,
+            qualifier=None,
+            payload_key=None,
+            aws_profile=None,
+            template_id="",
         )
 
 
