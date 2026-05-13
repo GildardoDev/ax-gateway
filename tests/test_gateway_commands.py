@@ -3179,6 +3179,45 @@ def test_sanitize_exec_env_sets_ollama_model_override():
     assert env["OLLAMA_MODEL"] == "gemma4:latest"
 
 
+def test_sanitize_exec_env_sets_bedrock_env_vars():
+    env = gateway_core.sanitize_exec_env(
+        "hello",
+        {
+            "agent_id": "agent-1",
+            "name": "bedrock-bot",
+            "runtime_type": "exec",
+            "bedrock_runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/r",
+            "bedrock_region": "us-east-1",
+            "bedrock_qualifier": "my-canary",
+            "bedrock_payload_key": "input",
+            "aws_profile": "dev-profile",
+        },
+    )
+
+    assert env["AX_BEDROCK_RUNTIME_ARN"] == "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/r"
+    assert env["AX_BEDROCK_REGION"] == "us-east-1"
+    assert env["AX_BEDROCK_QUALIFIER"] == "my-canary"
+    assert env["AX_BEDROCK_PAYLOAD_KEY"] == "input"
+    assert env["AWS_PROFILE"] == "dev-profile"
+
+
+def test_sanitize_exec_env_bedrock_omits_region_when_empty():
+    env = gateway_core.sanitize_exec_env(
+        "hello",
+        {
+            "agent_id": "agent-1",
+            "name": "bedrock-bot",
+            "runtime_type": "exec",
+            "bedrock_runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/r",
+            "bedrock_region": "",
+        },
+    )
+
+    assert "AX_BEDROCK_RUNTIME_ARN" in env
+    assert "AX_BEDROCK_REGION" not in env
+    assert "AWS_PROFILE" not in env
+
+
 def test_ollama_setup_status_recommends_recent_local_chat_model(monkeypatch):
     class _FakeResponse:
         def raise_for_status(self) -> None:
@@ -4138,8 +4177,107 @@ def test_gateway_agents_update_changes_template_and_workdir(monkeypatch, tmp_pat
     assert runtime_fingerprint["workdir"] == str(tmp_path)
     assert runtime_fingerprint["command"] == "python3 examples/gateway_ollama/ollama_bridge.py"
     assert runtime_fingerprint["runtime_fingerprint_hash"].startswith("sha256:")
+    stored = gateway_core.load_gateway_registry()["agents"][0]
     attestation = gateway_core.evaluate_runtime_attestation(registry_after, stored)
     assert attestation["attestation_state"] == "verified"
+
+
+VALID_BEDROCK_ARN = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/my-runtime"
+VALID_BEDROCK_ARN_2 = "arn:aws:bedrock-agentcore:eu-west-1:123456789012:runtime/my-runtime-v2"
+
+
+def test_gateway_agents_update_bedrock_arn(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {"token": "axp_u_test.token", "base_url": "https://paxai.app", "space_id": "space-1", "username": "codex"}
+    )
+    token_file = tmp_path / "bedrock.token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    entry = {
+        "name": "bedrock-bot",
+        "agent_id": "agent-1",
+        "space_id": "space-1",
+        "base_url": "https://paxai.app",
+        "runtime_type": "exec",
+        "template_id": "bedrock_agentcore",
+        "template_label": "Bedrock AgentCore",
+        "exec_command": "python3 examples/gateway_bedrock_agentcore/bedrock_agentcore_bridge.py",
+        "bedrock_runtime_arn": VALID_BEDROCK_ARN,
+        "bedrock_region": "us-east-1",
+        "bedrock_qualifier": "DEFAULT",
+        "bedrock_payload_key": "prompt",
+        "aws_profile": "",
+        "desired_state": "running",
+        "effective_state": "running",
+        "token_file": str(token_file),
+        "transport": "gateway",
+        "credential_source": "gateway",
+        "created_via": "cli",
+    }
+    registry["agents"] = [entry]
+    gateway_core.ensure_local_asset_binding(registry, entry, created_via="cli", auto_approve=True)
+    gateway_core.ensure_gateway_identity_binding(registry, entry, session=gateway_core.load_gateway_session())
+    gateway_core.save_gateway_registry(registry)
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: _FakeUserClient())
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "update", "bedrock-bot", "--bedrock-runtime-arn", VALID_BEDROCK_ARN_2, "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    stored = gateway_core.load_gateway_registry()["agents"][0]
+    assert stored["bedrock_runtime_arn"] == VALID_BEDROCK_ARN_2
+    assert stored["bedrock_region"] == "eu-west-1"  # region updated from new ARN
+
+
+def test_gateway_agents_update_clears_bedrock_on_template_switch(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    gateway_core.save_gateway_session(
+        {"token": "axp_u_test.token", "base_url": "https://paxai.app", "space_id": "space-1", "username": "codex"}
+    )
+    token_file = tmp_path / "bedrock.token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    entry = {
+        "name": "bedrock-bot",
+        "agent_id": "agent-1",
+        "space_id": "space-1",
+        "base_url": "https://paxai.app",
+        "runtime_type": "exec",
+        "template_id": "bedrock_agentcore",
+        "template_label": "Bedrock AgentCore",
+        "bedrock_runtime_arn": VALID_BEDROCK_ARN,
+        "bedrock_region": "us-east-1",
+        "bedrock_qualifier": "DEFAULT",
+        "bedrock_payload_key": "prompt",
+        "aws_profile": "dev",
+        "desired_state": "running",
+        "effective_state": "running",
+        "token_file": str(token_file),
+        "transport": "gateway",
+        "credential_source": "gateway",
+        "created_via": "cli",
+    }
+    registry["agents"] = [entry]
+    gateway_core.ensure_local_asset_binding(registry, entry, created_via="cli", auto_approve=True)
+    gateway_core.ensure_gateway_identity_binding(registry, entry, session=gateway_core.load_gateway_session())
+    gateway_core.save_gateway_registry(registry)
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: _FakeUserClient())
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "update", "bedrock-bot", "--template", "echo_test", "--json"],
+    )
+
+    assert result.exit_code == 0, result.output
+    stored = gateway_core.load_gateway_registry()["agents"][0]
+    assert "bedrock_runtime_arn" not in stored
+    assert "bedrock_region" not in stored
+    assert "aws_profile" not in stored
 
 
 def test_gateway_agents_add_ollama_persists_model_override(monkeypatch, tmp_path):

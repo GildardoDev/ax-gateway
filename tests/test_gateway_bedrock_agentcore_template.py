@@ -272,13 +272,37 @@ def test_build_bedrock_client_raises_on_missing_service(monkeypatch):
 
     with patch.dict(sys.modules, {"boto3": mock_boto3, "botocore": MagicMock(), "botocore.config": MagicMock()}):
         with pytest.raises(RuntimeError, match="bedrock-agentcore service client"):
-            bridge.build_bedrock_client(aws_profile="", region="us-east-1", runtime_arn=VALID_ARN)
+            bridge.build_bedrock_client(aws_profile="", region="us-east-1")
 
 
 def test_build_bedrock_client_raises_on_missing_boto3(monkeypatch):
     with patch.dict(sys.modules, {"boto3": None}):
         with pytest.raises((RuntimeError, ImportError)):
-            bridge.build_bedrock_client(aws_profile="", region="us-east-1", runtime_arn=VALID_ARN)
+            bridge.build_bedrock_client(aws_profile="", region="us-east-1")
+
+
+def test_build_bedrock_client_passes_profile_to_session():
+    mock_session = MagicMock()
+    mock_session.get_available_services.return_value = ["bedrock-agentcore"]
+    mock_session.client.return_value = MagicMock()
+    mock_boto3 = MagicMock()
+    mock_boto3.Session.return_value = mock_session
+
+    with patch.dict(sys.modules, {"boto3": mock_boto3, "botocore": MagicMock(), "botocore.config": MagicMock()}):
+        bridge.build_bedrock_client(aws_profile="my-profile", region="us-east-1")
+        mock_boto3.Session.assert_called_once_with(profile_name="my-profile")
+
+
+def test_build_bedrock_client_passes_none_profile_when_empty():
+    mock_session = MagicMock()
+    mock_session.get_available_services.return_value = ["bedrock-agentcore"]
+    mock_session.client.return_value = MagicMock()
+    mock_boto3 = MagicMock()
+    mock_boto3.Session.return_value = mock_session
+
+    with patch.dict(sys.modules, {"boto3": mock_boto3, "botocore": MagicMock(), "botocore.config": MagicMock()}):
+        bridge.build_bedrock_client(aws_profile="", region="us-east-1")
+        mock_boto3.Session.assert_called_once_with(profile_name=None)
 
 
 # ---------------------------------------------------------------------------
@@ -379,14 +403,15 @@ def test_bridge_inband_error_exits_nonzero(monkeypatch, capsys):
 
     rc = bridge.main()
     captured = capsys.readouterr()
-    assert rc == 0  # main() returns 0 after emitting status:error; error surfaced via event
+    assert rc == 0  # in-band error returns 0; error surfaced via status:error event
     event_lines = [ln for ln in captured.out.splitlines() if ln.startswith(bridge.EVENT_PREFIX)]
-    error_events = [
-        json.loads(ln[len(bridge.EVENT_PREFIX) :])
-        for ln in event_lines
-        if json.loads(ln[len(bridge.EVENT_PREFIX) :]).get("status") == "error"
-    ]
-    assert error_events, "expected a status:error event"
+    events = [json.loads(ln[len(bridge.EVENT_PREFIX) :]) for ln in event_lines]
+    statuses = [e.get("status") for e in events]
+    assert "error" in statuses, "expected a status:error event"
+    assert "completed" not in statuses, "status:completed must not follow status:error"
+    error_event = next(e for e in events if e.get("status") == "error")
+    assert "guardrail tripped" in error_event.get("error_message", "")
+    assert "detail" in error_event
 
 
 def test_bridge_empty_reply_emits_placeholder(monkeypatch, capsys):

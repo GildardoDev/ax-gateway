@@ -179,7 +179,7 @@ def classify_stream_event(line: str) -> tuple[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def build_bedrock_client(*, aws_profile: str, region: str, runtime_arn: str) -> Any:
+def build_bedrock_client(*, aws_profile: str, region: str) -> Any:
     """Build and return a boto3 bedrock-agentcore client.
 
     Validates that the service is available in the installed boto3 version.
@@ -191,7 +191,7 @@ def build_bedrock_client(*, aws_profile: str, region: str, runtime_arn: str) -> 
     except ImportError as exc:
         raise RuntimeError(f"boto3 is not installed: {exc}. Install it with: pip install 'axctl[bedrock]'") from exc
 
-    session = boto3.Session()
+    session = boto3.Session(profile_name=aws_profile or None)
     available = session.get_available_services()
     if "bedrock-agentcore" not in available:
         raise RuntimeError(
@@ -233,10 +233,11 @@ def _compute_session_id(agent_id: str, space_id: str) -> str:
 
 def _invoke_event_stream(
     client: Any, *, runtime_arn: str, session_id: str, payload_key: str, qualifier: str, prompt: str
-) -> tuple[str, int]:
+) -> tuple[str | None, int]:
     """Invoke the AgentCore runtime and consume the streaming response.
 
-    Returns (reply_text, chunk_count).
+    Returns (reply_text, chunk_count). reply_text is None when an in-band
+    error was encountered; callers must not emit status:completed in that case.
     """
     payload_body = json.dumps({payload_key: prompt})
     response = client.invoke_agent_runtime(
@@ -269,8 +270,15 @@ def _invoke_event_stream(
                 if value:
                     reply_parts.append(value)
             elif tag == "error_event":
-                emit_event({"kind": "status", "status": "error", "error_message": value.get("message", "unknown")})
-                return ("", chunks)
+                emit_event(
+                    {
+                        "kind": "status",
+                        "status": "error",
+                        "error_message": value.get("message", "unknown"),
+                        "detail": value.get("detail", {}),
+                    }
+                )
+                return (None, chunks)
             elif tag == "typed_event":
                 emit_event(value)
             elif tag == "heartbeat_chunk":
@@ -332,7 +340,7 @@ def main() -> int:
         return 1
 
     try:
-        client = build_bedrock_client(aws_profile=aws_profile, region=region, runtime_arn=runtime_arn)
+        client = build_bedrock_client(aws_profile=aws_profile, region=region)
     except RuntimeError as exc:
         emit_event({"kind": "status", "status": "error", "error_message": str(exc)})
         print(f"bedrock_agentcore bridge: {exc}", file=sys.stderr)
@@ -371,6 +379,10 @@ def main() -> int:
         )
         print(f"bedrock_agentcore bridge: {exc}", file=sys.stderr)
         return 1
+
+    if reply is None:
+        # in-band error already emitted status:error — do not follow with status:completed
+        return 0
 
     duration_ms = int((time.monotonic() - started) * 1000)
     emit_event(
