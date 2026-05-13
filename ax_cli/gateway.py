@@ -6059,7 +6059,14 @@ class ManagedAgentRuntime:
             command = str(self.entry.get("exec_command") or "").strip()
             if not command:
                 raise ValueError("exec runtime requires exec_command")
-            sender_id = str((data or {}).get("agent_id") or (data or {}).get("agent_name") or "").strip() or None
+            _d = data or {}
+            _author = _d.get("author") or {}
+            sender_id = (
+                str(
+                    _author.get("id") or _author.get("name") or _d.get("agent_id") or _d.get("agent_name") or ""
+                ).strip()
+                or None
+            )
             return _run_exec_handler(
                 command,
                 prompt,
