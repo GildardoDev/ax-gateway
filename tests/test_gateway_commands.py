@@ -146,8 +146,10 @@ def test_gateway_local_init_with_create_workdir_provisions_directory(monkeypatch
     monkeypatch.setattr(
         gateway_cmd,
         "_request_local_connect",
-        lambda **kwargs: calls.setdefault("connect", kwargs)
-        or {"status": "approved", "session_token": "tok", "agent": {"name": kwargs["agent_name"]}},
+        lambda **kwargs: (
+            calls.setdefault("connect", kwargs)
+            or {"status": "approved", "session_token": "tok", "agent": {"name": kwargs["agent_name"]}}
+        ),
     )
 
     new_workdir = tmp_path / "agents" / "fresh"
@@ -315,9 +317,7 @@ def test_session_challenge_valid_proof_rotates_and_returns_next_code(monkeypatch
 
     # First call issues the challenge.
     with pytest.raises(ValueError) as first:
-        gateway_cmd._send_local_session_message(
-            session_token=token, body={"content": "first", "space_id": "space-1"}
-        )
+        gateway_cmd._send_local_session_message(session_token=token, body={"content": "first", "space_id": "space-1"})
     issued = str(first.value).split(":", 1)[1].strip().split(".", 1)[0].strip()
 
     # Second call with the matching proof succeeds and rotates.
@@ -342,9 +342,7 @@ def test_session_challenge_wrong_proof_rejected(monkeypatch, tmp_path):
 
     # Issue a challenge first.
     with pytest.raises(ValueError) as first:
-        gateway_cmd._send_local_session_message(
-            session_token=token, body={"content": "first", "space_id": "space-1"}
-        )
+        gateway_cmd._send_local_session_message(session_token=token, body={"content": "first", "space_id": "space-1"})
     issued = str(first.value).split(":", 1)[1].strip().split(".", 1)[0].strip()
 
     with pytest.raises(ValueError) as wrong:
@@ -1413,11 +1411,7 @@ def test_gateway_local_connect_infers_agent_from_workdir_config(monkeypatch, tmp
     ax_dir = tmp_path / ".ax"
     ax_dir.mkdir()
     (ax_dir / "config.toml").write_text(
-        "[gateway]\n"
-        'mode = "local"\n'
-        'url = "http://127.0.0.1:8765"\n'
-        "[agent]\n"
-        'agent_name = "frontend_sentinel"\n'
+        '[gateway]\nmode = "local"\nurl = "http://127.0.0.1:8765"\n[agent]\nagent_name = "frontend_sentinel"\n'
     )
 
     captured = {}
@@ -1452,11 +1446,7 @@ def test_gateway_local_connect_infers_agent_from_cwd_config(monkeypatch, tmp_pat
     ax_dir = tmp_path / ".ax"
     ax_dir.mkdir()
     (ax_dir / "config.toml").write_text(
-        "[gateway]\n"
-        'mode = "local"\n'
-        'url = "http://127.0.0.1:8765"\n'
-        "[agent]\n"
-        'agent_name = "frontend_sentinel"\n'
+        '[gateway]\nmode = "local"\nurl = "http://127.0.0.1:8765"\n[agent]\nagent_name = "frontend_sentinel"\n'
     )
 
     captured = {}
@@ -1505,9 +1495,7 @@ def test_local_process_fingerprint_resolves_executable_symlink(tmp_path):
 def test_gateway_local_connect_rejects_agent_workdir_mismatch(tmp_path):
     ax_dir = tmp_path / ".ax"
     ax_dir.mkdir()
-    (ax_dir / "config.toml").write_text(
-        "[gateway]\n" 'mode = "local"\n' "[agent]\n" 'agent_name = "frontend_sentinel"\n'
-    )
+    (ax_dir / "config.toml").write_text('[gateway]\nmode = "local"\n[agent]\nagent_name = "frontend_sentinel"\n')
 
     with pytest.raises(ValueError) as exc:
         gateway_cmd._request_local_connect(agent_name="codex", workdir=str(tmp_path))
@@ -1574,9 +1562,7 @@ def test_gateway_local_connect_rejects_second_identity_from_same_origin(monkeypa
         gateway_cmd._connect_local_pass_through_agent(agent_name="frontend_sentinel", fingerprint=changed_name)
 
 
-def test_gateway_local_connect_allows_existing_agent_to_reconnect_when_workdir_is_shared(
-    monkeypatch, tmp_path
-):
+def test_gateway_local_connect_allows_existing_agent_to_reconnect_when_workdir_is_shared(monkeypatch, tmp_path):
     """Multi-tenant case: cli_god and pulse-cc legitimately share a workdir.
 
     If pulse-cc was registered first and cli_god's row also exists, cli_god
@@ -1638,9 +1624,7 @@ def test_gateway_local_connect_allows_existing_agent_to_reconnect_when_workdir_i
     # already registered as @pulse-cc"); now it should succeed because
     # cli_god's own registry row is found by name first, before the
     # collision check runs.
-    result = gateway_cmd._connect_local_pass_through_agent(
-        agent_name="cli_god", fingerprint=cli_god_fingerprint
-    )
+    result = gateway_cmd._connect_local_pass_through_agent(agent_name="cli_god", fingerprint=cli_god_fingerprint)
     assert result["agent"]["name"] == "cli_god"
     assert result["agent"]["agent_id"] == "agent-cli-god"
 
@@ -1679,9 +1663,7 @@ def test_gateway_local_connect_still_blocks_fresh_name_when_workdir_is_owned(mon
 
     fresh_attempt = {**fingerprint, "agent_name": "newbie"}
     with pytest.raises(ValueError, match="already registered as @owner"):
-        gateway_cmd._connect_local_pass_through_agent(
-            agent_name="newbie", fingerprint=fresh_attempt
-        )
+        gateway_cmd._connect_local_pass_through_agent(agent_name="newbie", fingerprint=fresh_attempt)
 
 
 def test_find_agent_entry_by_ref_matches_row_and_stable_prefix():
@@ -3424,11 +3406,12 @@ def test_gateway_templates_command_json():
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     ids = [item["id"] for item in payload["templates"]]
-    assert ids[:9] == [
+    assert ids[:10] == [
         "hermes",
         "ollama",
         "langgraph",
         "strands",
+        "bedrock_agentcore",
         "echo_test",
         "service_account",
         "pass_through",
@@ -3436,7 +3419,7 @@ def test_gateway_templates_command_json():
         "claude_code_channel",
     ]
     assert "inbox" not in ids
-    assert payload["count"] == 9
+    assert payload["count"] == 10
     ollama = next(item for item in payload["templates"] if item["id"] == "ollama")
     assert ollama["runtime_type"] == "exec"
     assert ollama["launchable"] is True
@@ -3580,12 +3563,12 @@ def test_gateway_ui_handler_serves_status_and_agent_detail(monkeypatch, tmp_path
             assert template_payload["templates"][0]["id"] == "hermes"
             assert template_payload["templates"][2]["id"] == "langgraph"
             assert template_payload["templates"][3]["id"] == "strands"
-            assert template_payload["templates"][5]["id"] == "service_account"
+            assert template_payload["templates"][6]["id"] == "service_account"
             channel_template = next(
                 item for item in template_payload["templates"] if item["id"] == "claude_code_channel"
             )
             assert channel_template["runtime_type"] == "claude_code_channel"
-            assert template_payload["count"] == 9
+            assert template_payload["count"] == 10
 
             detail = client.get("/api/agents/echo-bot")
             assert detail.status_code == 200
@@ -3830,9 +3813,7 @@ def test_gateway_move_updates_routing_for_test_messages(monkeypatch, tmp_path):
     # invoking principal, never the auto-created switchboard. This test runs
     # outside a Gateway-managed workspace, so name the sender explicitly to
     # exercise the routing-after-move semantics this test is about.
-    tested = gateway_cmd._send_gateway_test_to_managed_agent(
-        "mover", sender_agent="switchboard-space2"
-    )
+    tested = gateway_cmd._send_gateway_test_to_managed_agent("mover", sender_agent="switchboard-space2")
 
     assert tested["target_agent"] == "mover"
     assert tested["message"]["space_id"] == "space-2"
@@ -5971,21 +5952,21 @@ def test_gateway_activity_command_does_not_emit_credentials(monkeypatch, tmp_pat
 class _RecordingHeartbeatClient:
     """Records send_heartbeat / delete_agent calls for assertion."""
 
-    def __init__(self, *, fail_with: Exception | None = None,
-                 fail_status_code: int | None = None):
+    def __init__(self, *, fail_with: Exception | None = None, fail_status_code: int | None = None):
         self.heartbeats: list[dict] = []
         self.deletes: list[str] = []
         self._fail_with = fail_with
         self._fail_status_code = fail_status_code
 
-    def send_heartbeat(self, *, agent_id=None, status=None, note=None,
-                       cadence_seconds=None):
-        self.heartbeats.append({
-            "agent_id": agent_id,
-            "status": status,
-            "note": note,
-            "cadence_seconds": cadence_seconds,
-        })
+    def send_heartbeat(self, *, agent_id=None, status=None, note=None, cadence_seconds=None):
+        self.heartbeats.append(
+            {
+                "agent_id": agent_id,
+                "status": status,
+                "note": note,
+                "cadence_seconds": cadence_seconds,
+            }
+        )
         if self._fail_with is not None:
             exc = self._fail_with
             if self._fail_status_code is not None:
@@ -6001,8 +5982,9 @@ class _RecordingHeartbeatClient:
         return {"ok": True, "id": identifier}
 
 
-def _stale_hermes_entry(name: str, *, age_seconds: float, liveness: str = "stale",
-                        agent_id: str = "agent-stale-1") -> dict:
+def _stale_hermes_entry(
+    name: str, *, age_seconds: float, liveness: str = "stale", agent_id: str = "agent-stale-1"
+) -> dict:
     return {
         "name": name,
         "agent_id": agent_id,
@@ -6388,9 +6370,7 @@ def test_reconcile_skips_hidden_agents_no_runtime_no_upstream(monkeypatch, tmp_p
     # Hidden + archived must NOT have attestation_state populated by reconcile.
     # (evaluate_runtime_attestation runs only on the active path.)
     assert "attestation_state" not in stored_hidden or stored_hidden["attestation_state"] in (None, "")
-    assert "attestation_state" not in next(
-        a for a in registry["agents"] if a["name"] == "stale-archived"
-    ) or True
+    assert "attestation_state" not in next(a for a in registry["agents"] if a["name"] == "stale-archived") or True
 
 
 def test_reconcile_stops_runtime_when_agent_transitions_to_hidden(monkeypatch, tmp_path):
@@ -6427,8 +6407,7 @@ def test_reconcile_stops_runtime_when_agent_transitions_to_hidden(monkeypatch, t
 
 def test_status_payload_filters_hidden_by_default(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
-    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline",
-                                 agent_id="agent-hidden")
+    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline", agent_id="agent-hidden")
     hidden["lifecycle_phase"] = "hidden"
     active = {
         "name": "hermes-live",
@@ -6452,8 +6431,7 @@ def test_status_payload_filters_hidden_by_default(monkeypatch, tmp_path):
 
 def test_status_payload_include_hidden_returns_all(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
-    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline",
-                                 agent_id="agent-hidden")
+    hidden = _stale_hermes_entry("hermes-hidden", age_seconds=30 * 60, liveness="offline", agent_id="agent-hidden")
     hidden["lifecycle_phase"] = "hidden"
     active = {
         "name": "hermes-live",
@@ -6657,9 +6635,7 @@ def test_operator_cleanup_restore_unhides_selected_agents(monkeypatch, tmp_path)
 
     # Restore one row plus name a non-existent and a non-hidden row to verify
     # missing/not_hidden partitions.
-    payload = gateway_cmd._restore_hidden_managed_agents(
-        ["previously-hidden", "ghost", "active-keeper"]
-    )
+    payload = gateway_cmd._restore_hidden_managed_agents(["previously-hidden", "ghost", "active-keeper"])
 
     assert payload["count"] == 1
     assert payload["missing"] == ["ghost"]
@@ -6769,10 +6745,7 @@ def test_remove_managed_agent_proceeds_on_upstream_failure(monkeypatch, tmp_path
     registry_after = gateway_core.load_gateway_registry()
     assert all(a.get("name") != "doomed-agent" for a in registry_after.get("agents", []))
     recent = gateway_core.load_recent_gateway_activity()
-    assert any(
-        r.get("event") == "managed_agent_remove_upstream_failed"
-        for r in recent
-    )
+    assert any(r.get("event") == "managed_agent_remove_upstream_failed" for r in recent)
 
 
 def test_legacy_entry_without_lifecycle_phase_loads_as_active(monkeypatch, tmp_path):
@@ -6817,12 +6790,7 @@ def test_send_local_session_message_extracts_mentions_when_client_omits_them():
     }
     if body["parent_id"]:
         metadata.setdefault("routing_intent", "reply_with_mentions")
-    metadata = (
-        merge_explicit_mentions_metadata(
-            metadata, body["content"], exclude=["codex-local"]
-        )
-        or metadata
-    )
+    metadata = merge_explicit_mentions_metadata(metadata, body["content"], exclude=["codex-local"]) or metadata
 
     assert metadata["mentions"] == ["night_owl"]
     assert metadata["routing_intent"] == "reply_with_mentions"
@@ -6843,9 +6811,7 @@ def test_archive_managed_agent_sets_phase_and_stops_runtime(monkeypatch, tmp_pat
     }
     gateway_core.save_gateway_registry({"agents": [entry]})
     client = _RecordingHeartbeatClient()
-    result = gateway_cmd._archive_managed_agent(
-        "probe-doomed", reason="cleanup", client_factory=lambda: client
-    )
+    result = gateway_cmd._archive_managed_agent("probe-doomed", reason="cleanup", client_factory=lambda: client)
     assert result["lifecycle_phase"] == "archived"
     registry = gateway_core.load_gateway_registry()
     stored = next(a for a in registry["agents"] if a["name"] == "probe-doomed")
@@ -6876,12 +6842,8 @@ def test_archive_managed_agent_idempotent(monkeypatch, tmp_path):
     }
     gateway_core.save_gateway_registry({"agents": [entry]})
     client = _RecordingHeartbeatClient()
-    gateway_cmd._archive_managed_agent(
-        "probe-already", reason="second call", client_factory=lambda: client
-    )
-    stored = next(
-        a for a in gateway_core.load_gateway_registry()["agents"] if a["name"] == "probe-already"
-    )
+    gateway_cmd._archive_managed_agent("probe-already", reason="second call", client_factory=lambda: client)
+    stored = next(a for a in gateway_core.load_gateway_registry()["agents"] if a["name"] == "probe-already")
     # Reason not overwritten on a no-op archive — first archived_reason preserved.
     assert stored["archived_reason"] == "first call"
     assert client.heartbeats == []
@@ -6903,9 +6865,7 @@ def test_archive_then_restore_returns_to_prior_desired_state(monkeypatch, tmp_pa
     client = _RecordingHeartbeatClient()
     gateway_cmd._archive_managed_agent("probe-roundtrip", client_factory=lambda: client)
     gateway_cmd._restore_managed_agent("probe-roundtrip", client_factory=lambda: client)
-    stored = next(
-        a for a in gateway_core.load_gateway_registry()["agents"] if a["name"] == "probe-roundtrip"
-    )
+    stored = next(a for a in gateway_core.load_gateway_registry()["agents"] if a["name"] == "probe-roundtrip")
     assert stored["lifecycle_phase"] == "active"
     assert stored["desired_state"] == "running"
     assert "archived_at" not in stored
@@ -7039,9 +6999,7 @@ def test_save_registry_preserves_other_writer_added_row(monkeypatch, tmp_path):
 
     final = gateway_core.load_gateway_registry()
     names = {a["name"] for a in final["agents"]}
-    assert names == {"incumbent", "newcomer"}, (
-        "newcomer was clobbered by daemon save — registry write race regressed"
-    )
+    assert names == {"incumbent", "newcomer"}, "newcomer was clobbered by daemon save — registry write race regressed"
     # Daemon's effective_state update on the incumbent should still apply.
     incumbent = next(a for a in final["agents"] if a["name"] == "incumbent")
     assert incumbent["effective_state"] == "running"
@@ -7092,8 +7050,7 @@ def test_save_registry_preserves_other_writer_field_update(monkeypatch, tmp_path
     final = gateway_core.load_gateway_registry()
     stored = next(a for a in final["agents"] if a["name"] == "race-stop")
     assert stored["desired_state"] == "stopped", (
-        "daemon clobbered CLI's desired_state=stopped — field-level race "
-        "preservation regressed"
+        "daemon clobbered CLI's desired_state=stopped — field-level race preservation regressed"
     )
     # Daemon's effective_state telemetry update should still apply.
     assert stored["effective_state"] == "running"
@@ -7167,8 +7124,7 @@ def test_save_registry_preserves_archive_written_during_daemon_tick(monkeypatch,
 
 def test_status_payload_partitions_archived_separately(monkeypatch, tmp_path):
     _isolate_gateway_paths(monkeypatch, tmp_path)
-    archived = _stale_hermes_entry("hermes-archived", age_seconds=5.0, liveness="connected",
-                                   agent_id="agent-archived")
+    archived = _stale_hermes_entry("hermes-archived", age_seconds=5.0, liveness="connected", agent_id="agent-archived")
     archived["lifecycle_phase"] = "archived"
     archived["archived_at"] = gateway_core._now_iso()
     active = {
@@ -7230,8 +7186,7 @@ def test_runtime_start_skips_when_in_setup_error_backoff(monkeypatch, tmp_path):
 
     # Gate must early-return without firing a fresh runtime_error event.
     assert len(after) == len(before), (
-        "runtime.start() emitted a runtime_error event while in backoff "
-        "window — gate regressed"
+        "runtime.start() emitted a runtime_error event while in backoff window — gate regressed"
     )
     # State must be untouched — no transition through "starting".
     assert runtime._state.get("effective_state") != "starting"
@@ -7372,9 +7327,7 @@ def test_with_upstream_429_retry_caps_wait_at_max(monkeypatch):
         raise insane
 
     with pytest.raises(gateway_cmd.UpstreamRateLimitedError):
-        gateway_cmd._with_upstream_429_retry(
-            call, max_retries=2, base_wait=1.0, max_wait=30.0
-        )
+        gateway_cmd._with_upstream_429_retry(call, max_retries=2, base_wait=1.0, max_wait=30.0)
     assert sleeps == [30.0, 30.0]  # both capped at max_wait
 
 
@@ -7742,16 +7695,19 @@ def test_resolve_space_ref_uses_cache_when_upstream_429(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
     team_uuid = "78950af5-4d27-441b-9296-ec46de8ba35d"
-    gateway_core.save_space_cache([
-        {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank-workspace"},
-        {"id": team_uuid, "name": "aX CLI Dev", "slug": "ax-cli-dev"},
-    ])
+    gateway_core.save_space_cache(
+        [
+            {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank-workspace"},
+            {"id": team_uuid, "name": "aX CLI Dev", "slug": "ax-cli-dev"},
+        ]
+    )
 
     class Boom:
         def list_spaces(self):
             raise AssertionError("upstream must NOT be called when the cache has the slug")
 
     from ax_cli.config import _resolve_space_ref
+
     resolved = _resolve_space_ref(Boom(), "ax-cli-dev", source="explicit")
     assert resolved == team_uuid
 
@@ -7762,9 +7718,11 @@ def test_normalize_spaces_response_hydrates_name_from_cache(monkeypatch, tmp_pat
     falling back to the raw UUID."""
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
-    gateway_core.save_space_cache([
-        {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
-    ])
+    gateway_core.save_space_cache(
+        [
+            {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
+        ]
+    )
 
     upstream_partial = [
         {"id": _GOOD_SPACE_UUID, "name": "", "slug": "madtank"},
@@ -7799,14 +7757,16 @@ def test_runtime_reconcile_skips_phantom_rebinding_after_corruption_repair(monke
     daemon._runtimes = {}
     daemon.client_factory = lambda: object()
     daemon.logger = None
-    runtime = FakeRuntime({
-        "name": "agent-x",
-        "agent_id": "00000000-1111-2222-3333-444444444444",
-        "space_id": "madtank's Workspace",  # legacy non-UUID corruption
-        "base_url": "https://paxai.app",
-        "token_file": "/tmp/agent-token",
-        "runtime_type": "inbox",
-    })
+    runtime = FakeRuntime(
+        {
+            "name": "agent-x",
+            "agent_id": "00000000-1111-2222-3333-444444444444",
+            "space_id": "madtank's Workspace",  # legacy non-UUID corruption
+            "base_url": "https://paxai.app",
+            "token_file": "/tmp/agent-token",
+            "runtime_type": "inbox",
+        }
+    )
     daemon._runtimes["agent-x"] = runtime
     repaired_entry = {
         "name": "agent-x",
@@ -7827,8 +7787,7 @@ def test_runtime_reconcile_skips_phantom_rebinding_after_corruption_repair(monke
 
     rebindings = [c for c in captured if c["event"] == "runtime_rebinding"]
     assert rebindings == [], (
-        "reconcile() emitted a phantom runtime_rebinding when the only change "
-        "was a non-UUID -> UUID space_id repair"
+        "reconcile() emitted a phantom runtime_rebinding when the only change was a non-UUID -> UUID space_id repair"
     )
     assert runtime.entry["space_id"] == _GOOD_SPACE_UUID
 
@@ -7847,10 +7806,12 @@ def test_apply_entry_current_space_uses_global_cache_for_unknown_new_space(monke
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
     new_space = "78950af5-4d27-441b-9296-ec46de8ba35d"
-    gateway_core.save_space_cache([
-        {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
-        {"id": new_space, "name": "Claude Code Workshop", "slug": "claude-code-workshop"},
-    ])
+    gateway_core.save_space_cache(
+        [
+            {"id": _GOOD_SPACE_UUID, "name": "madtank's Workspace", "slug": "madtank"},
+            {"id": new_space, "name": "Claude Code Workshop", "slug": "claude-code-workshop"},
+        ]
+    )
     entry = {
         "name": "agent-x",
         "space_id": _GOOD_SPACE_UUID,
@@ -8094,9 +8055,7 @@ def test_local_inbox_resolves_slug_before_proxying(monkeypatch, tmp_path):
 def test_agents_inbox_resolves_slug_before_lookup(monkeypatch, tmp_path):
     """`ax gateway agents inbox --space <slug>` also resolves through the cache."""
     _seed_managed_inbox_agent(tmp_path, monkeypatch)
-    gateway_core.save_space_cache(
-        [{"id": "space-1", "name": "Test Space", "slug": "test-space"}]
-    )
+    gateway_core.save_space_cache([{"id": "space-1", "name": "Test Space", "slug": "test-space"}])
     monkeypatch.setattr(gateway_cmd, "AxClient", _FakeManagedSendClient)
     captured = {}
 
@@ -8105,15 +8064,17 @@ def test_agents_inbox_resolves_slug_before_lookup(monkeypatch, tmp_path):
     def spy_inbox(*, name, limit, channel, space_id, unread_only, mark_read):
         captured["space_id"] = space_id
         return real_inbox(
-            name=name, limit=limit, channel=channel, space_id=space_id,
-            unread_only=unread_only, mark_read=mark_read,
+            name=name,
+            limit=limit,
+            channel=channel,
+            space_id=space_id,
+            unread_only=unread_only,
+            mark_read=mark_read,
         )
 
     monkeypatch.setattr(gateway_cmd, "_inbox_for_managed_agent", spy_inbox)
 
-    result = runner.invoke(
-        app, ["gateway", "agents", "inbox", "cli_god", "--space", "test-space", "--json"]
-    )
+    result = runner.invoke(app, ["gateway", "agents", "inbox", "cli_god", "--space", "test-space", "--json"])
 
     assert result.exit_code == 0, result.output
     assert captured["space_id"] == "space-1"
@@ -8123,9 +8084,7 @@ def test_agents_inbox_unknown_slug_errors_clearly(monkeypatch, tmp_path):
     _seed_managed_inbox_agent(tmp_path, monkeypatch)
     gateway_core.save_space_cache([])
 
-    result = runner.invoke(
-        app, ["gateway", "agents", "inbox", "cli_god", "--space", "never-seen"]
-    )
+    result = runner.invoke(app, ["gateway", "agents", "inbox", "cli_god", "--space", "never-seen"])
 
     assert result.exit_code != 0
     assert "Could not resolve space" in result.output
@@ -8178,8 +8137,6 @@ def test_inbox_for_managed_agent_does_not_touch_pending_queue_without_mark_read(
 
     # Queue is preserved.
     assert len(gateway_core.load_agent_pending_messages("cli_god")) == 1
-
-
 
 
 def test_inbox_for_managed_agent_unread_only_intersects_pending_queue(monkeypatch, tmp_path):
@@ -8262,6 +8219,7 @@ def test_space_name_from_cache_rejects_uuid_stored_as_name():
     # This test documents the expected behavior — it will FAIL until the
     # fix lands, serving as a regression gate.
     import re
+
     uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
     assert result is None or not uuid_pattern.match(result), (
         f"_space_name_from_cache returned UUID-as-name '{result}' — "
@@ -8284,9 +8242,11 @@ def test_annotate_runtime_health_resolves_active_space_name_from_global_cache(mo
     space_uuid = "0478b063-4100-497d-bbea-2327bea48bc4"
     friendly_name = "ax-gateway"
 
-    gateway_core.save_space_cache([
-        {"id": space_uuid, "name": friendly_name, "slug": "ax-gateway"},
-    ])
+    gateway_core.save_space_cache(
+        [
+            {"id": space_uuid, "name": friendly_name, "slug": "ax-gateway"},
+        ]
+    )
 
     binding = {
         "identity_binding_id": "idbind_test",
@@ -8303,21 +8263,23 @@ def test_annotate_runtime_health_resolves_active_space_name_from_global_cache(mo
     }
     registry = gateway_core.load_gateway_registry()
     registry.setdefault("identity_bindings", []).append(binding)
-    registry.setdefault("agents", []).append({
-        "name": "test-agent",
-        "agent_id": "agent-test-1",
-        "identity_binding_id": "idbind_test",
-        "install_id": "install-1",
-        "base_url": "https://paxai.app",
-        "runtime_type": "hermes",
-        "template_id": "hermes",
-        "desired_state": "running",
-        "effective_state": "running",
-        "space_id": space_uuid,
-        "active_space_id": space_uuid,
-        "credential_source": "gateway",
-        "token_file": "/tmp/fake.token",
-    })
+    registry.setdefault("agents", []).append(
+        {
+            "name": "test-agent",
+            "agent_id": "agent-test-1",
+            "identity_binding_id": "idbind_test",
+            "install_id": "install-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes",
+            "template_id": "hermes",
+            "desired_state": "running",
+            "effective_state": "running",
+            "space_id": space_uuid,
+            "active_space_id": space_uuid,
+            "credential_source": "gateway",
+            "token_file": "/tmp/fake.token",
+        }
+    )
     gateway_core.save_gateway_registry(registry)
 
     snapshot = {
@@ -8339,11 +8301,11 @@ def test_annotate_runtime_health_resolves_active_space_name_from_global_cache(mo
     annotated = gateway_core.annotate_runtime_health(snapshot, registry=registry)
 
     import re
+
     uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
     active_name = annotated.get("active_space_name", "")
     assert not uuid_pattern.match(active_name), (
-        f"active_space_name is a raw UUID '{active_name}' — "
-        f"should be '{friendly_name}' from the global disk cache"
+        f"active_space_name is a raw UUID '{active_name}' — should be '{friendly_name}' from the global disk cache"
     )
     assert active_name == friendly_name
 
@@ -8363,9 +8325,11 @@ def test_apply_entry_current_space_falls_through_uuid_name_to_global_cache(monke
     space_uuid = _GOOD_SPACE_UUID
     friendly_name = "madtank's Workspace"
 
-    gateway_core.save_space_cache([
-        {"id": space_uuid, "name": friendly_name, "slug": "madtank"},
-    ])
+    gateway_core.save_space_cache(
+        [
+            {"id": space_uuid, "name": friendly_name, "slug": "madtank"},
+        ]
+    )
 
     entry = {
         "name": "agent-x",
@@ -8383,6 +8347,7 @@ def test_apply_entry_current_space_falls_through_uuid_name_to_global_cache(monke
     gateway_core.apply_entry_current_space(entry, space_uuid)
 
     import re
+
     uuid_pattern = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
     assert not uuid_pattern.match(entry["active_space_name"]), (
         f"active_space_name is still UUID '{entry['active_space_name']}' — "
@@ -8410,28 +8375,32 @@ def test_proxy_upload_file_rejects_path_outside_workdir(monkeypatch, tmp_path):
     token_file = tmp_path / "agent.token"
     token_file.write_text("axp_a_test.token")
 
-    gateway_core.save_gateway_session({
-        "token": "axp_u_test.token",
-        "base_url": "https://paxai.app",
-        "space_id": "space-1",
-        "username": "tester",
-    })
+    gateway_core.save_gateway_session(
+        {
+            "token": "axp_u_test.token",
+            "base_url": "https://paxai.app",
+            "space_id": "space-1",
+            "username": "tester",
+        }
+    )
     registry = gateway_core.load_gateway_registry()
-    registry["agents"] = [{
-        "name": "sandboxed-agent",
-        "agent_id": "agent-1",
-        "space_id": "space-1",
-        "base_url": "https://paxai.app",
-        "runtime_type": "hermes",
-        "template_id": "hermes",
-        "desired_state": "running",
-        "effective_state": "running",
-        "approval_state": "approved",
-        "token_file": str(token_file),
-        "transport": "gateway",
-        "credential_source": "gateway",
-        "workdir": str(agent_workdir),
-    }]
+    registry["agents"] = [
+        {
+            "name": "sandboxed-agent",
+            "agent_id": "agent-1",
+            "space_id": "space-1",
+            "base_url": "https://paxai.app",
+            "runtime_type": "hermes",
+            "template_id": "hermes",
+            "desired_state": "running",
+            "effective_state": "running",
+            "approval_state": "approved",
+            "token_file": str(token_file),
+            "transport": "gateway",
+            "credential_source": "gateway",
+            "workdir": str(agent_workdir),
+        }
+    ]
     gateway_core.save_gateway_registry(registry)
 
     entry = registry["agents"][0]

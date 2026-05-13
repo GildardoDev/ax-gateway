@@ -49,6 +49,9 @@ dev = [
     "ruff>=0.15.12",
     "twine>=6.2.0",
 ]
+bedrock = [
+    "boto3>=1.38",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

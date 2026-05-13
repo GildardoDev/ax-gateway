@@ -3923,6 +3923,17 @@ def sanitize_exec_env(prompt: str, entry: dict[str, Any]) -> dict[str, str]:
     hermes_repo_path = str(entry.get("hermes_repo_path") or "").strip()
     if hermes_repo_path:
         env["HERMES_REPO_PATH"] = hermes_repo_path
+    bedrock_arn = str(entry.get("bedrock_runtime_arn") or "").strip()
+    if bedrock_arn:
+        env["AX_BEDROCK_RUNTIME_ARN"] = bedrock_arn
+        bedrock_region = str(entry.get("bedrock_region") or "").strip()
+        if bedrock_region:
+            env["AX_BEDROCK_REGION"] = bedrock_region
+        env["AX_BEDROCK_QUALIFIER"] = str(entry.get("bedrock_qualifier") or "DEFAULT").strip() or "DEFAULT"
+        env["AX_BEDROCK_PAYLOAD_KEY"] = str(entry.get("bedrock_payload_key") or "prompt").strip() or "prompt"
+        aws_profile = str(entry.get("aws_profile") or "").strip()
+        if aws_profile:
+            env["AWS_PROFILE"] = aws_profile
     return env
 
 

@@ -421,6 +421,45 @@ def agent_template_catalog() -> dict[str, dict[str, Any]]:
                 "supports_command_override": True,
             },
         },
+        "bedrock_agentcore": {
+            "id": "bedrock_agentcore",
+            "label": "Bedrock AgentCore",
+            "description": "Amazon Bedrock AgentCore Runtime managed by Gateway.",
+            "availability": "ready",
+            "launchable": True,
+            "runtime_type": "exec",
+            "asset_class": "interactive_agent",
+            "intake_model": "launch_on_send",
+            "trigger_sources": ["direct_message"],
+            "return_paths": ["inline_reply"],
+            "telemetry_shape": "basic",
+            "suggested_name": "bedrock-bot",
+            "operator_summary": (
+                "Gateway-managed bridge for a deployed Amazon Bedrock AgentCore runtime. "
+                "Invoke-only: the operator deploys the runtime with the AgentCore CLI; "
+                "this template brings it onto the aX network."
+            ),
+            "recommended_test_message": "Reply with: Bedrock AgentCore round trip OK.",
+            "what_you_need": [
+                "An AWS account with a deployed AgentCore runtime.",
+                "The runtime ARN (from `agentcore list-runtimes`).",
+                "boto3 default credential chain configured (env vars, ~/.aws/credentials, instance profile, SSO).",
+                "IAM permission: bedrock-agentcore:InvokeAgentRuntime on the runtime ARN.",
+                "pip install 'axctl[bedrock]' to add the boto3 dependency.",
+            ],
+            "setup_skill": "gateway-agent-setup",
+            "setup_skill_path": str(skill_path),
+            "defaults": {
+                "runtime_type": "exec",
+                "exec_command": "python3 examples/gateway_bedrock_agentcore/bedrock_agentcore_bridge.py",
+                "workdir": str(repo_root),
+            },
+            "signals": runtime_signals["exec"],
+            "advanced": {
+                "adapter_label": "Gateway-managed Bedrock AgentCore bridge",
+                "supports_command_override": True,
+            },
+        },
         "hermes": {
             "id": "hermes",
             "label": "Hermes",
@@ -639,6 +678,7 @@ def agent_template_list(*, include_advanced: bool = False) -> list[dict[str, Any
         "ollama",
         "langgraph",
         "strands",
+        "bedrock_agentcore",
         "echo_test",
         "service_account",
         "pass_through",
