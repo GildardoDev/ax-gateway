@@ -3977,6 +3977,7 @@ def _run_exec_handler(
     *,
     message_id: str | None = None,
     space_id: str | None = None,
+    sender_id: str | None = None,
     timeout_seconds: int | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> str:
@@ -3986,6 +3987,8 @@ def _run_exec_handler(
         env["AX_GATEWAY_MESSAGE_ID"] = message_id
     if space_id:
         env["AX_GATEWAY_SPACE_ID"] = space_id
+    if sender_id:
+        env["AX_GATEWAY_SENDER_ID"] = sender_id
     # Expose the composed system prompt (operator role + gateway environment
     # context) so exec-runtime bridges (Ollama, custom python bridges, etc.)
     # can read it via env. Hermes / Claude / Sentinel pass the prompt as a
@@ -6056,12 +6059,14 @@ class ManagedAgentRuntime:
             command = str(self.entry.get("exec_command") or "").strip()
             if not command:
                 raise ValueError("exec runtime requires exec_command")
+            sender_id = str((data or {}).get("agent_id") or (data or {}).get("agent_name") or "").strip() or None
             return _run_exec_handler(
                 command,
                 prompt,
                 self.entry,
                 message_id=message_id or None,
                 space_id=self.space_id,
+                sender_id=sender_id,
                 timeout_seconds=runtime_timeout_seconds(self.entry),
                 on_event=lambda event: self._handle_exec_event(event, message_id=message_id),
             )

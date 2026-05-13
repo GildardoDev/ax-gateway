@@ -9,8 +9,8 @@ Auth: boto3 default credential chain (env vars, ~/.aws/credentials, instance
 profile, SSO session). Gateway never stores AWS secrets.
 
 Session continuity: one persistent AgentCore runtime session per
-(agent_id, space_id) pair. Cross-user contamination in wide group spaces
-is documented in docs/gateway-agent-runtimes.md.
+(agent_id, space_id, sender_id) triple. sender_id is injected by Gateway
+as AX_GATEWAY_SENDER_ID, isolating sessions per caller in shared spaces.
 """
 
 from __future__ import annotations
@@ -217,12 +217,16 @@ def build_bedrock_client(*, aws_profile: str, region: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-def _compute_session_id(agent_id: str, space_id: str) -> str:
-    """Stable, deterministic session id per (agent_id, space_id) pair.
+def _compute_session_id(agent_id: str, space_id: str, sender_id: str | None = None) -> str:
+    """Stable, deterministic session id scoped to (agent_id, space_id, sender_id).
 
+    Including sender_id prevents cross-user session contamination in shared spaces.
     AgentCore requires runtimeSessionId >= 33 chars.
     """
-    raw = uuid.uuid5(uuid.NAMESPACE_URL, f"ax-gateway:{agent_id}:{space_id}").hex
+    key = f"ax-gateway:{agent_id}:{space_id}"
+    if sender_id:
+        key = f"{key}:{sender_id}"
+    raw = uuid.uuid5(uuid.NAMESPACE_URL, key).hex
     return raw.ljust(33, "_")
 
 
@@ -333,6 +337,7 @@ def main() -> int:
     space_id = (
         os.environ.get("AX_GATEWAY_SPACE_ID", "").strip() or os.environ.get("AX_SPACE_ID", "").strip() or "unknown"
     )
+    sender_id = os.environ.get("AX_GATEWAY_SENDER_ID", "").strip() or None
 
     if not runtime_arn:
         emit_event({"kind": "status", "status": "error", "error_message": "AX_BEDROCK_RUNTIME_ARN is not set"})
@@ -346,7 +351,7 @@ def main() -> int:
         print(f"bedrock_agentcore bridge: {exc}", file=sys.stderr)
         return 1
 
-    session_id = _compute_session_id(agent_id, space_id)
+    session_id = _compute_session_id(agent_id, space_id, sender_id)
 
     emit_event({"kind": "status", "status": "processing", "message": "Invoking AgentCore runtime"})
     emit_event(

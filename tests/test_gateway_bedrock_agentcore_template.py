@@ -340,6 +340,24 @@ def test_compute_session_id_differs_by_agent():
     assert sid1 != sid2
 
 
+def test_compute_session_id_differs_by_sender():
+    sid1 = bridge._compute_session_id("agent-1", "space-1", "user-a")
+    sid2 = bridge._compute_session_id("agent-1", "space-1", "user-b")
+    assert sid1 != sid2
+
+
+def test_compute_session_id_same_sender_is_stable():
+    sid1 = bridge._compute_session_id("agent-1", "space-1", "user-a")
+    sid2 = bridge._compute_session_id("agent-1", "space-1", "user-a")
+    assert sid1 == sid2
+
+
+def test_compute_session_id_no_sender_differs_from_with_sender():
+    sid_no_sender = bridge._compute_session_id("agent-1", "space-1")
+    sid_with_sender = bridge._compute_session_id("agent-1", "space-1", "user-a")
+    assert sid_no_sender != sid_with_sender
+
+
 # ---------------------------------------------------------------------------
 # Bridge I/O loop integration
 # ---------------------------------------------------------------------------
