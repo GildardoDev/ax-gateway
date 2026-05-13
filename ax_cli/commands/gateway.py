@@ -1830,7 +1830,7 @@ def _update_managed_agent(
             "bedrock_payload_key": bedrock_payload_key,
             "aws_profile": aws_profile,
         }
-        if any(v is not _UNSET for v in bedrock_flags.values()):
+        if template is not None or any(v is not _UNSET for v in bedrock_flags.values()):
             normalized_bedrock = _validate_bedrock_options(
                 runtime_arn=bedrock_runtime_arn
                 if bedrock_runtime_arn is not _UNSET

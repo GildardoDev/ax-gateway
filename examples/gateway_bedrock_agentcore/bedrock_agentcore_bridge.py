@@ -381,8 +381,9 @@ def main() -> int:
         return 1
 
     if reply is None:
-        # in-band error already emitted status:error — do not follow with status:completed
-        return 0
+        # in-band error already emitted status:error — exit nonzero so Gateway's
+        # worker loop does not auto-emit a synthetic completed event
+        return 1
 
     duration_ms = int((time.monotonic() - started) * 1000)
     emit_event(

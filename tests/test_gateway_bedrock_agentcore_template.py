@@ -403,7 +403,7 @@ def test_bridge_inband_error_exits_nonzero(monkeypatch, capsys):
 
     rc = bridge.main()
     captured = capsys.readouterr()
-    assert rc == 0  # in-band error returns 0; error surfaced via status:error event
+    assert rc != 0
     event_lines = [ln for ln in captured.out.splitlines() if ln.startswith(bridge.EVENT_PREFIX)]
     events = [json.loads(ln[len(bridge.EVENT_PREFIX) :]) for ln in event_lines]
     statuses = [e.get("status") for e in events]

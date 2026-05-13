@@ -4280,6 +4280,46 @@ def test_gateway_agents_update_clears_bedrock_on_template_switch(monkeypatch, tm
     assert "aws_profile" not in stored
 
 
+def test_gateway_agents_update_template_switch_to_bedrock_requires_arn(monkeypatch, tmp_path):
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("AX_BEDROCK_RUNTIME_ARN", raising=False)
+    gateway_core.save_gateway_session(
+        {"token": "axp_u_test.token", "base_url": "https://paxai.app", "space_id": "space-1", "username": "codex"}
+    )
+    token_file = tmp_path / "echo.token"
+    token_file.write_text("axp_a_agent.secret")
+    registry = gateway_core.load_gateway_registry()
+    entry = {
+        "name": "echo-bot",
+        "agent_id": "agent-1",
+        "space_id": "space-1",
+        "base_url": "https://paxai.app",
+        "runtime_type": "echo",
+        "template_id": "echo_test",
+        "template_label": "Echo (Test)",
+        "desired_state": "running",
+        "effective_state": "running",
+        "token_file": str(token_file),
+        "transport": "gateway",
+        "credential_source": "gateway",
+        "created_via": "cli",
+    }
+    registry["agents"] = [entry]
+    gateway_core.ensure_local_asset_binding(registry, entry, created_via="cli", auto_approve=True)
+    gateway_core.ensure_gateway_identity_binding(registry, entry, session=gateway_core.load_gateway_session())
+    gateway_core.save_gateway_registry(registry)
+    monkeypatch.setattr(gateway_cmd, "_load_gateway_user_client", lambda: _FakeUserClient())
+
+    result = runner.invoke(
+        app,
+        ["gateway", "agents", "update", "echo-bot", "--template", "bedrock_agentcore", "--json"],
+    )
+
+    assert result.exit_code != 0
+    assert "bedrock-runtime-arn" in result.output.lower() or "runtime_arn" in result.output.lower()
+
+
 def test_gateway_agents_add_ollama_persists_model_override(monkeypatch, tmp_path):
     config_dir = tmp_path / "config"
     monkeypatch.setenv("AX_CONFIG_DIR", str(config_dir))
